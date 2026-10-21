@@ -27,6 +27,12 @@ jobs:
           sh -n app/src/main/assets/runtime/lib.sh
       - name: Build and test
         run: bash ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
+      - name: Inspect single-APK payload
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          for item in assets/xposed_init assets/runtime/byd_sign.sh assets/runtime/lib.sh assets/runtime/root-install.sh assets/runtime/root-boot.sh assets/runtime/bin/arm64-v8a/curl assets/runtime/bin/arm64-v8a/openssl assets/runtime/bin/armeabi-v7a/curl assets/runtime/bin/armeabi-v7a/openssl; do
+            unzip -Z1 "$APK" | grep -Fx "$item" >/dev/null || { echo "Missing APK asset: $item"; exit 1; }
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: BYDAutoSign-debug

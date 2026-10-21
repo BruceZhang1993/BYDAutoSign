@@ -9,7 +9,8 @@ android {
     defaultConfig {
         applicationId 'com.brucezhang.bydautosign'
         minSdk 26
-        targetSdk 35
+        // Preserve wxcode target API during stage-1 compatibility migration.
+        targetSdk 34
         versionCode 1
         versionName '0.1.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'

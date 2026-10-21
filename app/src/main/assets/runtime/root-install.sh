@@ -20,6 +20,15 @@ if [ ! -f "$D/code_api.conf" ]; then
     printf 'ports=8088\nforce_foreground_wake=false\n' > "$D/code_api.conf"
   fi
 fi
+# Migrate very old JSON port configuration without dropping any original data.
+if grep -q '^[[:space:]]*{' "$D/code_api.conf" 2>/dev/null; then
+  old_ports=$(sed -n 's/.*"ports"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' "$D/code_api.conf" | tr -d '"' | tr ',' ' ' | xargs 2>/dev/null || true)
+  old_wake=$(sed -n 's/.*"force_foreground_wake"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' "$D/code_api.conf" | tr -d ' "[:space:]')
+  [ -n "$old_ports" ] || old_ports=8088
+  [ "$old_wake" = true ] || old_wake=false
+  cp "$D/code_api.conf" "$D/code_api.conf.legacy-json.bak"
+  printf 'ports=%s\nforce_foreground_wake=%s\n' "$(echo "$old_ports" | tr ' ' ',')" "$old_wake" > "$D/code_api.conf"
+fi
 if [ ! -f "$D/email.conf" ]; then
   if [ -f /sdcard/Android/byd_sign/email.conf ]; then
     cp /sdcard/Android/byd_sign/email.conf "$D/email.conf"
