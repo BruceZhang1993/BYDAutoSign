@@ -14,7 +14,8 @@ verify_blob() {
   [[ "$actual" == "$expected" ]] || { echo "Git blob SHA mismatch: $file" >&2; exit 1; }
 }
 download() {
-  local abi="$1" name="$2" sha="$3" target="$DEST/$abi/$name"
+  local abi="$1" name="$2" sha="$3"
+  local target="$DEST/$abi/$name"
   mkdir -p "$DEST/$abi"
   if [[ ! -f "$target" ]]; then
     curl --fail --location --retry 3 --connect-timeout 20 --output "$target" "https://raw.githubusercontent.com/xiaojinwen/byd_sign/$UPSTREAM/bin/$abi/$name"
