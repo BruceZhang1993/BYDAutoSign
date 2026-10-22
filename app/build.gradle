@@ -70,9 +70,8 @@ tasks.register('verifySignRuntime') {
 tasks.named('preBuild') { dependsOn('verifySignRuntime') }
 
 dependencies {
-    // Match wxcode's Xposed API and NanoHTTPD implementation for stage-1 compatibility.
+    // Hook calls the framework LSPosed API in the injected process.
     compileOnly files('libs/api-82.jar')
-    implementation 'org.nanohttpd:nanohttpd:2.3.1'
     implementation platform('androidx.compose:compose-bom:2024.09.03')
     implementation 'androidx.compose.ui:ui'
     implementation 'androidx.compose.material3:material3'
