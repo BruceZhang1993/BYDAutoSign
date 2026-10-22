@@ -44,7 +44,6 @@ private fun Dashboard(bridge: RootBridge) {
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf(DeviceState()) }
     var ports by remember { mutableStateOf("8088") }
-    var forceWake by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var resultText by remember { mutableStateOf("") }
 
@@ -52,7 +51,6 @@ private fun Dashboard(bridge: RootBridge) {
         val newState = bridge.refresh()
         state = newState
         ports = newState.ports
-        forceWake = newState.forceForegroundWake
     }
 
     fun execute(action: suspend () -> ShellResult) {
@@ -82,14 +80,14 @@ private fun Dashboard(bridge: RootBridge) {
         ) {
             item {
                 Text("自动签到", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-                Text("一个应用管理微信授权、Root 定时和签到任务", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("初始化时授权微信，日常签到直接使用已保存的会话", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             item {
                 Section("环境状态") {
                     HealthLine("Root 运行环境", state.rootRuntimeInstalled,
                         if (state.rootRuntimeInstalled) "已部署到 /data/adb/byd_sign" else "需要初始化")
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    HealthLine("微信 Hook", state.hookConnected && state.hookConfigured,
+                    HealthLine("微信 Hook（仅授权阶段需要）", state.hookConnected && state.hookConfigured,
                         if (!state.hookConnected) "未连接：请检查 LSPosed 作用域并启动微信"
                         else if (!state.hookConfigured) "微信 " + state.hookVersion + "：版本映射未就绪"
                         else "已连接 · 微信 " + state.hookVersion)
@@ -122,7 +120,7 @@ private fun Dashboard(bridge: RootBridge) {
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(enabled = !busy, onClick = { execute { bridge.initialize() } }) {
-                            Text(if (state.rootRuntimeInstalled) "重新部署" else "一键初始化")
+                            Text(if (state.rootRuntimeInstalled) "重新部署并授权" else "初始化并授权")
                         }
                         OutlinedButton(enabled = !busy, onClick = { scope.launch { busy = true; try { reload() } finally { busy = false } } }) {
                             Text("刷新")
@@ -131,8 +129,32 @@ private fun Dashboard(bridge: RootBridge) {
                 }
             }
             item {
+                Section("会话授权") {
+                    Text(
+                        "微信小程序 code 只在初始化/重新授权时获取，立即兑换为 BYD 会话并保存在 Root 私有目录。会话是否长期有效由服务端决定。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    if (state.sessionSummary.isNotBlank()) {
+                        SelectionContainer {
+                            Text(state.sessionSummary, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    } else {
+                        Text("尚无会话信息", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(
+                        enabled = state.rootRuntimeInstalled && !busy,
+                        onClick = { execute { bridge.authorize() } }
+                    ) {
+                        Text("重新授权")
+                    }
+                }
+            }
+            item {
                 Section("签到任务") {
-                    Text("按计划于每日 00:01、07:01、13:01、22:01 执行；自动跳过已成功签到的账号。",
+                    Text("签到只使用缓存的 BYD session_id，不请求微信 code、不唤醒微信；会话失效后需重新授权。",
                         style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(12.dp))
                     Button(
@@ -158,19 +180,13 @@ private fun Dashboard(bridge: RootBridge) {
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = forceWake, onCheckedChange = { forceWake = it })
-                        Column {
-                            Text("允许短暂打开微信唤醒")
-                            Text("默认关闭；仅在后台无法获取 code 时尝试开启",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
+                    Text("微信唤醒仅用于手动授权。保存新端口后，需要为该实例执行重新授权。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(8.dp))
                     FilledTonalButton(
                         enabled = state.rootRuntimeInstalled && !busy,
-                        onClick = { execute { bridge.savePorts(ports, forceWake) } }
+                        onClick = { execute { bridge.savePorts(ports) } }
                     ) {
                         Text("保存配置")
                     }
@@ -196,7 +212,7 @@ private fun Dashboard(bridge: RootBridge) {
             }
             item {
                 Text(
-                    "阶段 1 · 兼容现有签到脚本和 LSPosed Hook。需要 Root（Magisk / KernelSU / APatch）与 LSPosed。保留原有邮件、Webhook 和签到状态配置。",
+                    "需要 Root（Magisk / KernelSU / APatch）和 LSPosed 完成初次授权。会话失效前，定时签到无需微信进程运行。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 24.dp)

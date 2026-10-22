@@ -62,7 +62,7 @@ retry_command() {
 
 # 包装函数只负责输出结果；retry_command 会安全地捕获 stdout，不进行二次命令解析。
 _get_code_checked() {
-    get_code "$1"
+    get_code "$1" "$2"
 }
 
 _get_session_id_checked() {
@@ -254,18 +254,18 @@ get_code() {
     # curl 选择由 lib.sh 统一处理：优先使用模块内置 $WORK_DIR/curl。
     local response_file="$WORK_DIR/.code_response_${port}_$$"
     local code=""
-    code=$(get_code_from_api "$port" "$APPID" "" "$response_file")
+    code=$(get_code_from_api "$port" "$APPID" "$2" "$response_file")
     local ret=$?
     local response=$(cat "$response_file" 2>/dev/null)
     rm -f "$response_file" 2>/dev/null
 
     # 检查 code 是否为空或无效值（如 null、空字符串）
     if [ "$ret" -ne 0 ]; then
-        log "[端口 ${port}] 错误: 本地接口请求失败，响应: $response"
+        log "[端口 ${port}] 错误: 本地接口请求失败（详情已隐藏，退出码 $ret）"
         return 66
     fi
     if [ -z "$code" ] || [ "$code" = "null" ]; then
-        log "[端口 ${port}] 错误: 本地接口返回无效code，响应: $response"
+        log "[端口 ${port}] 错误: 本地接口返回无效 code（详情已隐藏）"
         return 66
     fi
 
@@ -348,7 +348,7 @@ do_sign() {
     
     if [ "$decrypt_ret" -eq 0 ] && [ -n "$decrypted" ]; then
         log "[端口 ${port}] 签到响应已接收（已隐藏敏感内容）"
-        if echo "$decrypted" | grep -q '"ret":200'; then
+        if echo "$decrypted" | grep -q '"ret"[[:space:]]*:[[:space:]]*200'; then
             local duration_days=$(echo "$decrypted" | grep -o '"durationDays"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$')
             if [ -n "$duration_days" ]; then
                 log "[端口 ${port}] 签到成功！已连续签到 ${duration_days} 天"
@@ -359,7 +359,12 @@ do_sign() {
             fi
             return 0
         else
-            log "[端口 ${port}] 签到失败"
+            if printf '%s' "$decrypted" | grep -Eiq 'session[_ ]?id[^"]*(失效|过期|invalid|expired)|未登录|登录已过期|session expired|invalid session'; then
+                log "[端口 ${port}] 服务器反馈会话失效，需重新授权"
+                echo "FAILED|AUTH_EXPIRED"
+                return 78
+            fi
+            log "[端口 ${port}] 签到失败（保留会话，响应已隐藏）"
             echo "FAILED|签到失败"
             return 1
         fi
@@ -370,8 +375,123 @@ do_sign() {
     fi
 }
 
+
+# WeChat mini-program code is one-time. Persist only its exchanged BYD session_id.
+SESSION_DIR="$WORK_DIR/sessions"
+
+valid_port() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge 1024 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null
+}
+
+session_path() {
+    valid_port "$1" || return 1
+    printf '%s/%s.session\n' "$SESSION_DIR" "$1"
+}
+
+save_session() {
+    local port="$1" value="$2" target temporary
+    target=$(session_path "$port") || return 1
+    [ -n "$value" ] && [ "${#value}" -le 2048 ] || return 1
+    if printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'; then return 1; fi
+    umask 077
+    mkdir -p "$SESSION_DIR" || return 1
+    chmod 700 "$SESSION_DIR" || return 1
+    temporary="${target}.$"
+    (umask 077; printf '%s' "$value" > "$temporary") || return 1
+    chmod 600 "$temporary" || return 1
+    mv -f "$temporary" "$target" || return 1
+    date '+%Y-%m-%d %H:%M:%S' > "${target}.at"
+    chmod 600 "${target}.at"
+}
+
+load_session() {
+    local target
+    target=$(session_path "$1") || return 1
+    [ -f "$target" ] && [ ! -L "$target" ] && [ -s "$target" ] || return 1
+    cat "$target"
+}
+
+forget_session() {
+    local target
+    target=$(session_path "$1") || return 1
+    rm -f "$target" "${target}.at"
+}
+
+session_status() {
+    local port target at
+    for port in $(get_code_api_ports); do
+        valid_port "$port" || continue
+        target=$(session_path "$port") || continue
+        if [ -s "$target" ] && [ ! -L "$target" ]; then
+            at=$(cat "${target}.at" 2>/dev/null)
+            printf '端口 %s：已初始化会话（%s；有效期由服务端决定）\n' "$port" "${at:-时间未知}"
+        else
+            printf '端口 %s：未授权或会话已失效，需要重新授权\n' "$port"
+        fi
+    done
+}
+
+# Only explicit authorization may wake WeChat; sign-only never does.
+authorize() {
+    local port code session ok=0 failed=0
+    umask 077
+    mkdir -p "$SESSION_DIR" "$LOG_DIR" || return 1
+    chmod 700 "$SESSION_DIR"
+    log "== 初始化授权开始（允许唤醒微信） =="
+    wake_wechat_silent || true
+    for port in $(get_code_api_ports); do
+        if ! valid_port "$port"; then
+            log "忽略无效端口"
+            failed=$((failed + 1))
+            continue
+        fi
+        log "[端口 ${port}] 请求一次性 code 并兑换会话"
+        if retry_command 2 3 _get_code_checked "$port" "--connect-timeout 6 --max-time 32"; then
+            code="$RETRY_OUTPUT"
+        else
+            # Foreground fallback belongs ONLY to the explicit authorization phase.
+            log "[端口 ${port}] 后台取码失败，尝试前台唤醒微信"
+            am start --activity-no-animation -n com.tencent.mm/.ui.LauncherUI >/dev/null 2>&1 || true
+            sleep 3
+            if retry_command 1 0 _get_code_checked "$port" "--connect-timeout 6 --max-time 32"; then
+                code="$RETRY_OUTPUT"
+            else
+                log "[端口 ${port}] 初始化失败：微信未返回有效 code"
+                failed=$((failed + 1))
+                continue
+            fi
+        fi
+        if ! retry_command 2 4 _get_session_id_checked "$code" "$port"; then
+            code=""
+            log "[端口 ${port}] 初始化失败：无法兑换 BYD 会话"
+            failed=$((failed + 1))
+            continue
+        fi
+        session="$RETRY_OUTPUT"
+        code="" # Never persist code.
+        if save_session "$port" "$session"; then
+            log "[端口 ${port}] 初始化完成：会话已保存（仅 Root 可读）"
+            ok=$((ok + 1))
+        else
+            log "[端口 ${port}] 初始化失败：会话保存失败"
+            failed=$((failed + 1))
+        fi
+        session=""
+    done
+    log "== 授权结果：成功 ${ok} / 失败 ${failed} =="
+    [ "$failed" -eq 0 ] && [ "$ok" -gt 0 ]
+}
+
 main() {
+    umask 077
     mkdir -p "$LOG_DIR"
+    case "$1" in
+        authorize) authorize; return $? ;;
+        status) session_status; return 0 ;;
+        nonauto|"") ;;
+        *) log "未知命令"; return 2 ;;
+    esac
     auto=false
     [ "$1" != "nonauto" ] && auto=true
 
@@ -395,7 +515,6 @@ main() {
     local skip_count=0
     local result_details=""
     local best_days="0"
-    local wechat_woken=false
 
     for port in $ports; do
         log ""
@@ -410,36 +529,16 @@ main() {
             continue
         fi
 
-        # 本轮首次真正需要取 code 时，执行一次微信唤醒（尽量不进前台）
-        # 注意: 不修改 get_code 的超时行为
-        if [ "$wechat_woken" = false ]; then
-            wake_wechat_silent
-            wechat_woken=true
-        fi
-
-        # 获取code（带重试）
-        local code=""
-        if ! retry_command 2 10 _get_code_checked "$port"; then
-
-            log "[端口 ${port}] 错误: 获取code失败，已重试2次"
+        # Sign-only: never touch WeChat and never exchange a new code.
+        local session_id
+        session_id=$(load_session "$port") || session_id=""
+        if [ -z "$session_id" ]; then
+            log "[端口 ${port}] 尚未初始化会话，请在应用内重新授权"
             fail_count=$((fail_count + 1))
-            result_details="${result_details}  - 端口 ${port}: 获取code失败\n"
-            log "== [端口 ${port}] 签到失败 =="
+            result_details="${result_details}  - 端口 ${port}: 需要重新授权\n"
+            log "== [端口 ${port}] 缺少会话，跳过 =="
             continue
         fi
-        code="$RETRY_OUTPUT"
-
-        # 获取session_id（网络失败可重试，解密/解析失败快速失败）
-        local session_id=""
-        if ! retry_command 2 10 _get_session_id_checked "$code" "$port"; then
-
-            log "[端口 ${port}] 错误: 获取session_id失败，已重试2次"
-            fail_count=$((fail_count + 1))
-            result_details="${result_details}  - 端口 ${port}: 获取session_id失败\n"
-            log "== [端口 ${port}] 签到失败 =="
-            continue
-        fi
-        session_id="$RETRY_OUTPUT"
 
         # 执行签到（网络失败可重试，解密/业务失败快速失败）
         local sign_output=""
@@ -462,8 +561,13 @@ main() {
                 continue
             fi
         else
+            if [ "$RETRY_OUTPUT" = "FAILED|AUTH_EXPIRED" ]; then
+                forget_session "$port"
+                result_details="${result_details}  - 端口 ${port}: 会话已过期，请重新授权\n"
+            else
+                result_details="${result_details}  - 端口 ${port}: 签到失败（会话保留）\n"
+            fi
             fail_count=$((fail_count + 1))
-            result_details="${result_details}  - 端口 ${port}: 签到失败\n"
             log "== [端口 ${port}] 签到失败 =="
             continue
         fi

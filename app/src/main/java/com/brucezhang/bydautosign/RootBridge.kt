@@ -24,6 +24,8 @@ data class DeviceState(
     val probeStatus: String = "",
     val probeRunning: Boolean = false,
     val codeVerified: Boolean = false,
+    val sessionSummary: String = "",
+    val sessionReady: Boolean = false,
     val ports: String = "8088",
     val forceForegroundWake: Boolean = false,
     val recentActivity: String = "",
@@ -88,17 +90,27 @@ class RootBridge(private val context: Context) {
             }
             val result = shell("sh " + quote(File(stage, "root-install.sh").absolutePath) +
                 " " + quote(stage.absolutePath), 60)
-            result
+            if (!result.ok) return@withContext result
+            val auth = shell("sh " + rootDir + "/byd_sign.sh authorize", 210)
+            ShellResult(auth.exitCode,
+                "Root 运行环境已部署。\n" +
+                (if (auth.ok) "会话初始化成功。\n" else "会话初始化未全部成功，请检查微信登录或重新授权。\n") +
+                auth.output)
         } catch (e: Exception) {
             ShellResult(-1, "初始化失败：" + (e.message ?: e.javaClass.simpleName))
         }
     }
 
-    suspend fun savePorts(portsText: String, forceWake: Boolean): ShellResult = withContext(Dispatchers.IO) {
+    suspend fun authorize(): ShellResult = withContext(Dispatchers.IO) {
+        shell("test -x " + rootDir + "/byd_sign.sh && sh " +
+            rootDir + "/byd_sign.sh authorize", 210)
+    }
+
+    suspend fun savePorts(portsText: String): ShellResult = withContext(Dispatchers.IO) {
         val ports = PortConfig.normalize(portsText)
             ?: return@withContext ShellResult(2, "端口无效：请填写 1024–65535 范围的端口，以英文逗号分隔。")
         val file = File(context.filesDir, "code_api.pending.conf")
-        file.writeText("ports=" + ports + "\nforce_foreground_wake=" + forceWake + "\n")
+        file.writeText("ports=" + ports + "\nforce_foreground_wake=false\n")
         shell("test -d " + rootDir + " && cp " + quote(file.absolutePath) +
             " " + rootDir + "/code_api.conf && chmod 600 " + rootDir + "/code_api.conf")
     }
@@ -115,6 +127,9 @@ class RootBridge(private val context: Context) {
         val config = if (installed) shell("cat " + rootDir + "/code_api.conf", 10) else ShellResult(-1, "")
         val parsed = PortConfig.fromFile(config.output)
         val hook = checkHook()
+        // Read only redacted status; never read or display session_id contents.
+        val sessionStatus = if (installed) shell("sh " + rootDir + "/byd_sign.sh status", 10)
+            else ShellResult(-1, "")
         val logs = if (installed) {
             shell("tail -n 20 " + rootDir + "/logs/sign_\$(date +%Y-%m-%d).log 2>/dev/null", 10)
         } else ShellResult(-1, "")
@@ -128,10 +143,12 @@ class RootBridge(private val context: Context) {
             probeStatus = hook.status,
             probeRunning = hook.running,
             codeVerified = hook.verified,
+            sessionSummary = if (sessionStatus.ok) sessionStatus.output else "",
+            sessionReady = sessionStatus.ok && sessionStatus.output.contains("已初始化会话"),
             ports = parsed.first,
             forceForegroundWake = parsed.second,
             recentActivity = sanitize(logs.output),
-            diagnostic = if (installed) "Root 调度目录已部署；每日 00:01、07:01、13:01、22:01 自动尝试。" else
+            diagnostic = if (installed) "定时签到只使用已保存的 BYD 会话，不会自动唤醒微信；会话失效时需要手动重新授权。" else
                 "尚未初始化 Root 任务。请授予 Root 权限后点击初始化。"
         )
     }

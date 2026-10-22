@@ -19,14 +19,14 @@
 1. 确认设备已有 **Root（Magisk / KernelSU / APatch）**、**LSPosed**，以及已登录的微信。
 2. 在 [Actions](https://github.com/BruceZhang1993/BYDAutoSign/actions) 下载最新成功构建的 `BYDAutoSign-debug` APK 并安装。
 3. 在 LSPosed 启用 BYD Auto Sign，作用域勾选微信 `com.tencent.mm`，**强制停止后重新启动微信**。
-4. 打开 BYD Auto Sign，授予 Root，点击 **一键初始化**。安装器会从 APK 内部释放 Shell 运行环境，并注册 service.d 开机任务（无需单独安装 Root 模块 ZIP）。
-5. 检查微信 Hook 状态后，点击 **立即签到** 验证。分身用户可在端口框填写 `8088,8098` 等端口并保存。
+4. 打开 BYD Auto Sign，授予 Root，点击 **初始化并授权**。安装器会从 APK 内部释放 Shell 运行环境，并注册 service.d 开机任务（无需单独安装 Root 模块 ZIP）。
+5. 确认「会话授权」区域显示已初始化会话，之后点击 **立即签到** 验证。分身用户可在端口框填写 `8088,8098` 等端口并保存。
 
 > 系统分身的端口由 wxcode 按 User ID 计算，不应任意猜测；可查阅原 wxcode 文档。管理页目前探测默认主微信 `8088`。
 
 **已有 byd_sign 用户**：运行时继续使用 `/data/adb/byd_sign`，不会覆盖现有 `code_api.conf`、`email.conf`、签到状态和日志。若旧版 byd_sign Root 模块仍启用，建议在验证新应用工作后将旧模块停用，避免双重开机调度。
 
-**目前的限制**：本阶段仍使用原有 Shell、curl、OpenSSL 和本地 HTTP 登录桥。微信完全停止、Android 深度休眠或厂商后台限制时，仍可能需要首次手动打开微信；无法保证每一种 ROM 下无界面自动唤醒。Root 定时任务在 Root 管理器支持 `/data/adb/service.d` 且 BusyBox crond 可用时独立于 APK 进程运行。前台保活、受保护 IPC 等改进详见路线图。
+**目前的限制**：本阶段仍使用 Shell、curl、OpenSSL 和本机 HTTP 授权桥。**微信只在手动初始化/重新授权时需要**，日常签到使用已保存的 BYD `session_id`，不再唤醒微信；会话有效期尚未经验证，过期后必须手动重新授权。Root 定时任务在 Root 管理器支持 `/data/adb/service.d` 且 BusyBox crond 可用时独立于 APK 进程运行。前台保活、受保护 IPC 等改进详见路线图。
 
 ## 构建
 
@@ -77,3 +77,13 @@ docs/TEST_PLAN.md               # 回归清单
 目前四组混淆类、构造参数及任务提交方法可以动态发现；LoginTask 的字段映射仍要满足已知结构（代码会检查字段是否存在，不会盲目继续），微信若改变字段语义或登录协议，需要进一步更新解析器。也不保证对 Google Play 特殊变体、不可读运行时 DEX 或大规模逻辑重构自动兼容。
 
 运行阶段只分析本机微信文件，不会上传 APK 或个人数据。手动探测接口属于第一阶段的本机 HTTP 兼容桥，后续按路线图迁移到受保护 IPC。
+
+## 授权和签到分离（v0.3.0）
+
+- **初始化并授权**：部署 Root 任务、唤醒微信，获取一次性 `code` 后立即调用 `mina.decryptCode` 换取 BYD `session_id`。仅将 session 保存在 Root 私有目录 `/data/adb/byd_sign/sessions/<port>.session`，不保存 code。
+- **重新授权**：已有部署时，只为已配置的微信端口重新获取并覆盖 session；失败不会删除旧会话。
+- **立即签到/cron**：只读取缓存 session，然后调用 `activity/sign/signIn`。即使微信已被系统结束，签到流程也不会调用微信、获取 code 或前台唤醒。
+- 服务端明确响应 session 失效时，清除此端口 session 并提示重新授权；普通网络或业务失败时不会随意删除会话。
+- 新增端口后需手动执行重新授权；应用只展示各端口是否有凭证及授权时间，不读取/打印真实 session。
+
+**注意**：微信小程序的 code 不能长期复用。比亚迪服务端 session 的真实有效期未知，暂不支持保证授权一次永久签到，也不在自动签到任务中隐式刷新。请用真机确认该 session 能否跨天复用。如果服务端每日强制重新授权，需要单独设计受控的授权刷新机制，不能假装现有 session 永久有效。

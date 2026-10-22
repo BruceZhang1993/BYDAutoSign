@@ -16,10 +16,13 @@ BYD Auto Sign APK
              ↓ Root 初始化
 /data/adb/byd_sign（旧版数据路径、状态、日志）
 /data/adb/service.d/byd_auto_sign.sh（开机启动 BusyBox crond）
+            初始化/手动重新授权：
+byd_sign.sh authorize → 唤醒微信 → /login 取得一次性 code
+           → mina.decryptCode → session_id
+           → /data/adb/byd_sign/sessions/<port>.session (0600)
              ↓ 00:01 / 07:01 / 13:01 / 22:01
-byd_sign.sh → localhost:8088/login?appId=... → 微信生成 code
-            → /?service=mina.decryptCode → session_id
-            → activity/sign/signIn → 签到结果和通知
+byd_sign.sh (cron) → 读取本地 session_id → activity/sign/signIn
+                   → 签到结果和通知（不调用微信）
 ```
 
 ### 数据兼容
@@ -61,3 +64,14 @@ force_foreground_wake=false
 `WxLoginHook` 保留内置表快速路径；当映射失效时以单任务形式异步运行扫描。签到取码会限时等待探测，避免返回过时的类名错误。管理应用通过本机 `/whoami` 和 `/probe` 查看进度与触发手动重新探测。
 
 **限制**：结构校验只保证类、构造、提交方法及已知 LoginTask 字段可用；混淆字段语义变化和无法读取的内存 DEX 仍可能导致取码失败。后续需完善字段级 DEX 推断及安全 IPC。
+
+## 会话初始化和日常签到（v0.3.0）
+
+CLI：
+- `sh /data/adb/byd_sign/byd_sign.sh authorize`：明确的微信授权操作，允许后台/前台唤醒微信、获取 code、换取 session，并原子覆盖 Root 私有 session 文件。
+- `sh /data/adb/byd_sign/byd_sign.sh status`：仅返回授权状态和时间，不显示 session 或 code。
+- `sh /data/adb/byd_sign/byd_sign.sh nonauto`：只签到、不授权；cron 不传参走相同的 sign-only 路径。
+- 会话存储路径 `sessions/<port>.session`，目录权限 0700，文件权限 0600。旧账号设置、签到历史、Webhook 配置均保留。
+- 用户新增/修改端口后必须重新授权。服务端明确反馈会话失效时移除对应 session；其他业务失败保留凭证以便后续重试。
+
+此改动不改变 HTTPS 加密协议，不保存一次性微信 code。**未取得 BYD 服务端公开会话 TTL 或刷新接口**：缓存有效性只能通过签到 API 的实际反馈判断，不承诺初始化一次可长期使用。签到任务不会隐式刷新；真机需验证跨天、重启与过期场景。将来若服务端 session 生命周期太短，可新增独立的预约授权/刷新工作流，并通过 UI 显式说明微信唤醒行为。

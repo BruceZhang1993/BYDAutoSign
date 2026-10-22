@@ -4,8 +4,8 @@ set -eu
 SRC="$1"
 D=/data/adb/byd_sign
 BOOT=/data/adb/service.d/byd_auto_sign.sh
-mkdir -p "$D" "$D/logs" "$D/cron.d" /data/adb/service.d
-chmod 700 "$D" "$D/logs" "$D/cron.d"
+mkdir -p "$D" "$D/logs" "$D/cron.d" "$D/sessions" /data/adb/service.d
+chmod 700 "$D" "$D/logs" "$D/cron.d" "$D/sessions"
 for name in byd_sign.sh lib.sh webui_api.sh curl openssl; do
   test -s "$SRC/$name" || { echo "MISSING:$name"; exit 2; }
   cp "$SRC/$name" "$D/$name"
