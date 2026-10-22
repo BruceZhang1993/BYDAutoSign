@@ -16,6 +16,8 @@ data class ShellResult(val exitCode: Int, val output: String) {
 }
 data class DeviceState(
     val rootRuntimeInstalled: Boolean = false,
+    val cronRunning: Boolean = false,
+    val cronStatus: String = "",
     val hookConnected: Boolean = false,
     val ipcConnected: Boolean = false,
     val ipcStatus: String = "",
@@ -181,6 +183,12 @@ class RootBridge(private val context: Context) {
             " " + rootDir + "/code_api.conf && chmod 600 " + rootDir + "/code_api.conf")
     }
 
+    /** Restart only BYDAutoSign's own Root crond, never other Root modules. */
+    suspend fun restartScheduler(): ShellResult = withContext(Dispatchers.IO) {
+        shell("test -f /data/adb/service.d/byd_auto_sign.sh && " +
+            "/system/bin/sh /data/adb/service.d/byd_auto_sign.sh", 30)
+    }
+
     suspend fun signNow(): ShellResult = withContext(Dispatchers.IO) {
         shell("test -x " + rootDir + "/byd_sign.sh && /system/bin/sh " +
             rootDir + "/byd_sign.sh nonauto", 240)
@@ -190,6 +198,16 @@ class RootBridge(private val context: Context) {
         val runtime = shell("test -x " + rootDir + "/byd_sign.sh && test -x " +
             rootDir + "/curl && test -x " + rootDir + "/openssl && echo READY", 10)
         val installed = runtime.ok && runtime.output.contains("READY")
+        val scheduler = if (installed) {
+            shell("/system/bin/sh /data/adb/service.d/byd_auto_sign.sh status", 10)
+        } else ShellResult(1, "尚未部署")
+        val cronOk = scheduler.ok && scheduler.output.lineSequence().any { it.trim() == "CRON_RUNNING" }
+        val cronSummary = when {
+            !installed -> "先部署 Root 环境"
+            !cronOk -> "定时服务未运行，请点击“修复定时调度”"
+            !scheduler.output.contains("byd_sign.sh") -> "crond 运行中，但任务表没有签到命令"
+            else -> "crond 运行中 · 默认执行 00:01 / 07:01 / 13:01 / 22:01（如曾自定义则以任务表为准）"
+        }
         val config = if (installed) shell("cat " + rootDir + "/code_api.conf", 10) else ShellResult(-1, "")
         val parsed = PortConfig.fromFile(config.output)
         val hook = checkHook()
@@ -201,6 +219,8 @@ class RootBridge(private val context: Context) {
         } else ShellResult(-1, "")
         DeviceState(
             rootRuntimeInstalled = installed,
+            cronRunning = cronOk && scheduler.output.contains("byd_sign.sh"),
+            cronStatus = cronSummary,
             hookConnected = hook.connected,
             ipcConnected = com.brucezhang.bydautosign.ipc.IpcBrokerService.connected(),
             ipcStatus = com.brucezhang.bydautosign.ipc.IpcBrokerService.diagnostic(),
