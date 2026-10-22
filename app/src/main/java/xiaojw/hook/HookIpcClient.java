@@ -1,5 +1,6 @@
 package xiaojw.hook;
 
+import android.app.AppOpsManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -35,14 +36,9 @@ public final class HookIpcClient {
     private volatile IHookBroker broker;
 
     private void requireModuleCaller() {
-        int uid = Binder.getCallingUid();
-        String[] packages = context.getPackageManager().getPackagesForUid(uid);
-        if (packages != null) {
-            for (String name : packages) {
-                if (APP_PACKAGE.equals(name)) return;
-            }
-        }
-        throw new SecurityException("Only BYDAutoSign may invoke Hook IPC");
+        AppOpsManager ops = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
+        if (ops == null) throw new SecurityException("AppOps unavailable");
+        ops.checkPackage(Binder.getCallingUid(), APP_PACKAGE);
     }
 
     private final IHookEndpoint.Stub endpoint = new IHookEndpoint.Stub() {
