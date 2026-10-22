@@ -86,14 +86,15 @@
 
 ## Stage 2 IPC 技术研究（2026-10-22）
 
-详细方案见 [IPC_RESEARCH.md](IPC_RESEARCH.md)。该文档是**设计与 POC 计划**，不代表 IPC 已实现或经真机验证。
+详细方案见 [IPC_RESEARCH.md](IPC_RESEARCH.md)。该文档包含设计、已实现 POC 和设备验收状态；Binder Ping/Pong 已有主用户设备截图证据，取码/兑换仍待验证。
 
 - [x] 审阅现有 Hook / localhost HTTP / Root 授权链
 - [x] 对比 Binder AIDL、Messenger、ContentProvider、Root Unix socket 等路径
 - [x] 选定「微信 Hook 反向注册到模块 APK Service，再通过 Binder 回调取 code」为主用户候选架构
-- [ ] POC A：仅做 Binder 注册与 Ping/Pong，不传真实 code
-- [ ] POC B：实现带鉴权/超时的异步 code 回调，仍不切换现有签到
-- [ ] POC C：将一次性 code 经 Root stdin 兑换 session，正式切换后移除无鉴权 HTTP
+- [x] POC A：Binder 注册与 Ping/Pong 成功（2026-10-22 用户真机截图，User 0）
+- [x] POC B：已编码带鉴权/超时的异步 code 回调（CI 编译通过；真实 code 传输待真机验证）
+- [x] POC C：已编码一次性 code 通过 Root stdin 兑换 session 的实验入口（CI 编译通过）
+- [ ] POC B/C 真机验证：使用明确的「通过 Binder 重新授权」入口，确认 code → BYD session 全链路；当前旧 HTTP 初始化产生的会话**不算**通过
 - [ ] 多 User/系统分身绑定能力验证与跨用户 fallback 选型
 
 > 上述研究刻意不触及第一阶段业务回归或已投入使用的 HTTP/Shell 工作流。
