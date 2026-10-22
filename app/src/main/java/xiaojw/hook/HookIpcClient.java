@@ -74,7 +74,8 @@ public final class HookIpcClient {
     };
 
     public HookIpcClient(Context context) {
-        this.context = context.getApplicationContext();
+        // Application.attach may run before getApplicationContext() is ready.
+        this.context = context;
     }
 
     public void start() {
