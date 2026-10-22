@@ -14,7 +14,7 @@
 
 ## Root 环境诊断命令
 
-在终端执行（需要 Root）：
+在终端执行（需要 Root）。**先在新 APK 中点击“重新部署 Root 环境”**，因为旧版本启动脚本不支持只读 `status` 参数：
 
 ```sh
 su -c 'sh /data/adb/service.d/byd_auto_sign.sh status'
