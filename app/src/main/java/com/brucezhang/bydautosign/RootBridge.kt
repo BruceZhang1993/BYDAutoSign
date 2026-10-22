@@ -40,10 +40,11 @@ data class DeviceState(
  */
 class RootBridge(private val context: Context) {
     private val rootDir = "/data/adb/byd_sign"
+    private val bydAppId = "wxf62054ec313d6f53" // Must match byd_sign.sh and the Hook allowlist.
 
     private fun quote(value: String) = "'" + value.replace("'", "'\\''") + "'"
 
-    private fun shell(command: String, timeoutSeconds: Long = 20): ShellResult {
+    private fun shell(command: String, timeoutSeconds: Long = 20, stdin: String? = null): ShellResult {
         val process = try {
             ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
         } catch (error: Exception) {
@@ -59,6 +60,19 @@ class RootBridge(private val context: Context) {
                     }
                 }
             } catch (_: Exception) { }
+        }
+        if (stdin != null) {
+            try {
+                // Secret never appears in process argv, URLs or shell output.
+                process.outputStream.bufferedWriter(Charsets.UTF_8).use { writer ->
+                    writer.write(stdin)
+                    writer.newLine()
+                    writer.flush()
+                }
+            } catch (error: Exception) {
+                process.destroyForcibly()
+                return ShellResult(1, "Root 授权进程无法接收 IPC 凭证：" + error.javaClass.simpleName)
+            }
         }
         val finished = try {
             process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
@@ -106,6 +120,30 @@ class RootBridge(private val context: Context) {
     suspend fun authorize(): ShellResult = withContext(Dispatchers.IO) {
         shell("test -x " + rootDir + "/byd_sign.sh && sh " +
             rootDir + "/byd_sign.sh authorize", 210)
+    }
+
+    /**
+     * Experimental main-user Binder authorization. Existing authorize() and
+     * cron/signNow() are untouched. Never log or display the one-time code.
+     */
+    suspend fun authorizeViaBinder(): ShellResult = withContext(Dispatchers.IO) {
+        val result = com.brucezhang.bydautosign.ipc.IpcBrokerService.obtainCode(bydAppId)
+        if (!result.successful()) {
+            return@withContext ShellResult(1, "Binder 获取微信登录凭证失败（状态 " + result.status +
+                "）。原有会话不变，可继续使用旧授权。")
+        }
+        val rootResult = shell(
+            "test -x " + rootDir + "/byd_sign.sh && /system/bin/sh " +
+                rootDir + "/byd_sign.sh authorize-stdin 8088",
+            120, result.code
+        )
+        if (!rootResult.ok) {
+            ShellResult(rootResult.exitCode,
+                "Binder 已获取登录凭证，但 Root 会话兑换失败。请先重新部署运行环境。\n" +
+                    sanitize(rootResult.output))
+        } else {
+            ShellResult(0, "Binder 授权成功：主微信的 BYD 会话已安全持久化。")
+        }
     }
 
     suspend fun savePorts(portsText: String): ShellResult = withContext(Dispatchers.IO) {
