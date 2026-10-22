@@ -175,3 +175,17 @@ Android 每个 user/profile 有独立的 app UID 和组件可见性。模块只�
 - 现有 `LoginHttpServer` 的无鉴权敏感端点仍在运行，因此**不能把本阶段标记为完成安全 IPC 迁移**。
 
 本阶段按要求跳过真机业务回归验收；仍保留 CI 自带的静态检查与 Android 构建。
+
+## 10. 主用户 POC A 真机验证进展（2026-10-22）
+
+用户提供的 Android 真机界面截图显示：
+
+- 微信 8.0.79，Hook 内置映射结构校验通过。
+- Binder IPC 显示 `已注册 · UserHandle{0} · Ping/Pong 正常`。
+- Root 环境部署完成，端口 8088 的 BYD session 已在 2026-10-22 23:31:29 初始化并保存。
+
+因此 **POC A 主用户进程间注册与 Ping/Pong 已完成设备侧验证**。但这两张截图**不能证明**用于生成 session 的 code 经由 Binder：此前“重新部署并授权”仍可能使用兼容 HTTP。
+
+为明确区分实验验证，签入原有 Root 会话时现在额外在仅 Root 可访问的 `sessions/<port>.session.via` 中保存非敏感来源 `binder` 或 `http`。状态页面通过 `byd_sign.sh status` 将其显示成 `Binder IPC` 或 `旧 HTTP`。升级前已保存的会话无来源字段，显示“来源未知”。源文件只放通道类别，不读取或记录 code/session。
+
+**下一步设备验收：** 安装包含该变更的 APK、更新 Root 运行环境，然后明确点击“通过 Binder 重新授权（实验）”；看到成功提示及会话状态里标为“Binder IPC”，才可把 POC B/C 的全链路标记为真机通过。当前不能据此移除 HTTP 桥或宣称跨 User 分身支持。
