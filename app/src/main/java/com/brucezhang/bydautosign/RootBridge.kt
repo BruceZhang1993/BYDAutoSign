@@ -6,8 +6,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
@@ -38,8 +36,8 @@ data class DeviceState(
 )
 
 /**
- * Stage-1 compatibility bridge: install original byd_sign scripts and pinned executables,
- * and retain the original local wxcode API contract. Root runs outside the app lifecycle.
+ * Root-only scheduler and sign engine; WeChat authorization uses Binder IPC.
+ * Root runs independently of the application lifecycle.
  */
 class RootBridge(private val context: Context) {
     private val rootDir = "/data/adb/byd_sign"
@@ -122,44 +120,27 @@ class RootBridge(private val context: Context) {
         }
     }
 
-    /** Legacy HTTP authorization remains available as an explicit fallback. */
+    /** Default authorization: Binder only, no HTTP fallback. */
     suspend fun initialize(): ShellResult {
         val deployment = deployRuntimeOnly()
         if (!deployment.ok) return deployment
-        val auth = authorize()
-        return ShellResult(
-            auth.exitCode,
-            deployment.output + "\\n" +
-                if (auth.ok) "旧通道会话初始化成功。" else
-                    "Root 环境已部署，但旧通道授权失败。可以单独尝试 Binder 授权。"
-        )
+        val authorization = authorize()
+        return ShellResult(authorization.exitCode, deployment.output + "\n" + authorization.output)
     }
 
-    /** Preferred experimental first-run workflow; never falls back to HTTP silently. */
-    suspend fun initializeViaBinder(): ShellResult {
-        val deployment = deployRuntimeOnly()
-        if (!deployment.ok) return deployment
-        val auth = authorizeViaBinder()
-        return ShellResult(
-            auth.exitCode,
-            deployment.output + "\\n" + auth.output
-        )
-    }
+    suspend fun initializeViaBinder(): ShellResult = initialize()
 
-    suspend fun authorize(): ShellResult = withContext(Dispatchers.IO) {
-        shell("test -x " + rootDir + "/byd_sign.sh && sh " +
-            rootDir + "/byd_sign.sh authorize", 210)
-    }
+    suspend fun authorize(): ShellResult = authorizeViaBinder()
 
     /**
-     * Experimental main-user Binder authorization. Existing authorize() and
+     * Main-user Binder authorization; no localhost HTTP is used. Sign-only
      * cron/signNow() are untouched. Never log or display the one-time code.
      */
     suspend fun authorizeViaBinder(): ShellResult = withContext(Dispatchers.IO) {
         val result = com.brucezhang.bydautosign.ipc.IpcBrokerService.obtainCode(bydAppId)
         if (!result.successful()) {
             return@withContext ShellResult(1, "Binder 获取微信登录凭证失败（状态 " + result.status +
-                "）。原有会话不变，可继续使用旧授权。")
+                "）。原有会话保留；请检查微信 Hook 或重新探测 DEX。")
         }
         val rootResult = shell(
             "test -x " + rootDir + "/byd_sign.sh && /system/bin/sh " +
@@ -268,43 +249,29 @@ class RootBridge(private val context: Context) {
     )
 
     suspend fun probeNow(): ShellResult = withContext(Dispatchers.IO) {
-        try {
-            val conn = URL("http://127.0.0.1:8088/probe").openConnection() as HttpURLConnection
-            conn.connectTimeout = 2500
-            conn.readTimeout = 2500
-            try {
-                val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-                ShellResult(0, "DEX 探测任务已请求：" + json.optString("probeStatus", "等待执行") +
-                    "\n探测在微信后台线程运行，请稍后刷新查看结果。")
-            } finally {
-                conn.disconnect()
-            }
-        } catch (error: Exception) {
-            ShellResult(1, "无法请求微信 DEX 探测，请检查 Hook 是否启动：" + error.javaClass.simpleName)
+        if (com.brucezhang.bydautosign.ipc.IpcBrokerService.requestProbe()) {
+            ShellResult(0, "已通过 Binder 请求微信 DEX 探测，请稍后刷新")
+        } else {
+            ShellResult(1, "微信 Binder 未连接，无法请求 DEX 探测")
         }
     }
 
     private fun checkHook(): HookProbe {
         return try {
-            val connection = URL("http://127.0.0.1:8088/whoami").openConnection() as HttpURLConnection
-            connection.connectTimeout = 1500
-            connection.readTimeout = 1500
-            try {
-                val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-                val ok = json.optString("packageName") == "com.tencent.mm"
-                HookProbe(
-                    connected = ok,
-                    version = json.optString("version", ""),
-                    configured = ok && json.optBoolean("configSupported", false),
-                    error = json.optString("configError", ""),
-                    source = json.optString("configSource", ""),
-                    status = json.optString("probeStatus", ""),
-                    running = json.optBoolean("probeRunning", false),
-                    verified = json.optBoolean("codeVerified", false)
-                )
-            } finally {
-                connection.disconnect()
-            }
+            val data = com.brucezhang.bydautosign.ipc.IpcBrokerService.readHookStatus()
+                ?: return HookProbe(false)
+            val json = JSONObject(data)
+            val ok = json.optString("packageName") == "com.tencent.mm"
+            HookProbe(
+                connected = ok,
+                version = json.optString("version", ""),
+                configured = ok && json.optBoolean("configSupported", false),
+                error = json.optString("configError", ""),
+                source = json.optString("configSource", ""),
+                status = json.optString("probeStatus", ""),
+                running = json.optBoolean("probeRunning", false),
+                verified = json.optBoolean("codeVerified", false)
+            )
         } catch (_: Exception) {
             HookProbe(false)
         }
