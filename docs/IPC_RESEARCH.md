@@ -189,3 +189,15 @@ Android 每个 user/profile 有独立的 app UID 和组件可见性。模块只�
 为明确区分实验验证，签入原有 Root 会话时现在额外在仅 Root 可访问的 `sessions/<port>.session.via` 中保存非敏感来源 `binder` 或 `http`。状态页面通过 `byd_sign.sh status` 将其显示成 `Binder IPC` 或 `旧 HTTP`。升级前已保存的会话无来源字段，显示“来源未知”。源文件只放通道类别，不读取或记录 code/session。
 
 **下一步设备验收：** 安装包含该变更的 APK、更新 Root 运行环境，然后明确点击“通过 Binder 重新授权（实验）”；看到成功提示及会话状态里标为“Binder IPC”，才可把 POC B/C 的全链路标记为真机通过。当前不能据此移除 HTTP 桥或宣称跨 User 分身支持。
+
+## 11. Binder-only 切换实施记录（2026-10-22）
+
+**以下为本研究之后的实现状态，前文 POC A/B/C 及 HTTP 过渡描述属于历史记录。**
+
+- 主微信 Hook 已删除 `LoginHttpServer` 生命周期，不再打开本地监听端口；相关 Java 文件、ServerContext 和 NanoHTTPD 依赖已删除。
+- 主用户 Binder 对外提供 `ping`、`getHookStatus`、`triggerProbe`、`requestLoginCode`，均需 AppOps 真实 UID→包校验。管理 App 所有 Hook 状态、手动 DEX 探测和授权都只走 Binder。
+- Root 侧移除 localhost `/login` 客户端、旧 `authorize` 入口、WebUI HTTP Code 测试，统一改为 `authorize-stdin`；默认签到及 crond 从已持久化 session 直接签到。
+- 初始化/明确重新授权时，如果 Binder 未注册，Root 可按需唤醒微信并短时等待它注册；定时签到不会执行此操作。
+- 测试通过：Android 编译、APK 打包、Hook 映射检查、无 HTTP 依赖静态断言、模拟 Root stdin 兑换及会话文件隔离。新的 APK 尚未实机执行 Binder 取码和兑换验收。
+- **仍然缺少** POC B/C 的设备级证据、微信分身跨 User 安全注册、新版本签名 Release Artifact 的构建与部署。保持 Draft；不得将“Ping/Pong 通过”升级解释为“Binder 取码全链路通过”。
+- 升级注意：Root 历史槽位中的 session 不会清空。安装新 APK 后必须重启微信并重新部署 Root 运行时，旧 HTTP 不能作为回退路径。若真机授权未通过，应回滚这次 PR，而不是恢复无鉴权接口。
