@@ -445,6 +445,7 @@ main() {
     umask 077
     mkdir -p "$LOG_DIR"
     case "$1" in
+        wake-wechat) wake_wechat_silent; return $? ;;
         authorize-stdin) authorize_from_stdin "$2"; return $? ;;
         status) session_status; return 0 ;;
         nonauto|"") ;;
