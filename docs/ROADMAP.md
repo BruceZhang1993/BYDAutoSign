@@ -27,8 +27,8 @@
 - [ ] 将 `byd_sign.sh` 加解密、签名、请求构造迁移为 Kotlin/JCA/OkHttp
 - [ ] 增加原脚本与 Kotlin 的协议等价测试，使用脱敏 fixture 对比请求和返回
 - [ ] 删除运行时对 curl/OpenSSL 的依赖，缩减 APK 体积
-- [ ] 将 wxcode HTTP 登录桥替换为经过鉴权的 Binder/AIDL 通道（区分 Android user）
-- [ ] 校验调用 UID、请求来源、权限及参数；最小化 Hook 的攻击面
+- [x] 主用户：将 wxcode HTTP 登录桥从运行时代码中移除，替换为 UID 校验的 Binder/AIDL（跨 Android User 仍未实现）
+- [x] 主用户 Binder：通过 AppOps 校验调用 UID/包名，限制 appId/请求长度与并发，结果核验请求 ID 与调用 UID
 - [ ] 网络恢复 TLS 主机名和证书校验；移除上游 `--insecure` 参数
 - [ ] 将敏感 code / session_id / 原始响应从日志和错误报告中清除
 - [ ] Kotlin 数据存储（DataStore/Room）、账号独立签到状态与严格幂等
@@ -94,7 +94,22 @@
 - [x] POC A：Binder 注册与 Ping/Pong 成功（2026-10-22 用户真机截图，User 0）
 - [x] POC B：已编码带鉴权/超时的异步 code 回调（CI 编译通过；真实 code 传输待真机验证）
 - [x] POC C：已编码一次性 code 通过 Root stdin 兑换 session 的实验入口（CI 编译通过）
-- [ ] POC B/C 真机验证：使用明确的「通过 Binder 重新授权」入口，确认 code → BYD session 全链路；当前旧 HTTP 初始化产生的会话**不算**通过
+- [ ] POC B/C 真机验证：使用「通过 Binder 重新授权」确认 code → BYD session 全链路；仅 Ping/Pong 和旧 HTTP 会话不算通过
 - [ ] 多 User/系统分身绑定能力验证与跨用户 fallback 选型
 
 > 上述研究刻意不触及第一阶段业务回归或已投入使用的 HTTP/Shell 工作流。
+
+## HTTP 通道移除（主用户，代码完成 / 真机验收待补）
+
+- [x] 移除 `LoginHttpServer.java` / `ServerContext.java`、NanoHTTPD 依赖及 APK 的明文流量设置
+- [x] Hook 的状态查询和手动 DEX 探测改用受限的 AIDL
+- [x] 管理 App 不再发起任何 localhost HTTP 请求；初始化、重新授权只允许 Binder → stdin
+- [x] 删除 Root Shell 旧 `get_code_from_api`、`get_code`、`authorize` HTTP 分支及 WebUI HTTP 测试入口
+- [x] 保留 Root 已有 session 和定时签到行为；只有初始化/明确重新授权才允许唤醒微信
+- [x] 添加源码契约与 Root stdin 模拟测试，检查无 HTTP 依赖、Session 权限、签到与取码隔离
+- [ ] 用真实微信再次验证 Binder 取码和 BYD session 兑换 / 立即签到
+- [ ] 解决微信分身跨 User Binder 注册及新授权；过期的分身 session 无法靠当前主用户 Binder 更新
+- [ ] 回归验证锁屏定时、跨天 session 以及既有 Root 配置
+- [ ] 完成可原地升级的同证书 Release APK CI（现有 `BYD_SIGNING_*` 密钥环境尚未映射成功）
+
+> 迁移代码位于独立 Draft PR；**不能因编译成功将本阶段标成生产环境完全验收**。首次升级需重新部署 Root runtime、重启微信以加载新 Hook，旧会话原地保留。
