@@ -18,6 +18,8 @@ data class DeviceState(
     val rootRuntimeInstalled: Boolean = false,
     val hookConnected: Boolean = false,
     val hookVersion: String = "",
+    val hookConfigured: Boolean = false,
+    val hookError: String = "",
     val ports: String = "8088",
     val forceForegroundWake: Boolean = false,
     val recentActivity: String = "",
@@ -114,8 +116,10 @@ class RootBridge(private val context: Context) {
         } else ShellResult(-1, "")
         DeviceState(
             rootRuntimeInstalled = installed,
-            hookConnected = hook.first,
-            hookVersion = hook.second,
+            hookConnected = hook.connected,
+            hookVersion = hook.version,
+            hookConfigured = hook.configured,
+            hookError = hook.error,
             ports = parsed.first,
             forceForegroundWake = parsed.second,
             recentActivity = sanitize(logs.output),
@@ -124,7 +128,14 @@ class RootBridge(private val context: Context) {
         )
     }
 
-    private fun checkHook(): Pair<Boolean, String> {
+    private data class HookProbe(
+        val connected: Boolean,
+        val version: String = "",
+        val configured: Boolean = false,
+        val error: String = ""
+    )
+
+    private fun checkHook(): HookProbe {
         return try {
             val connection = URL("http://127.0.0.1:8088/whoami").openConnection() as HttpURLConnection
             connection.connectTimeout = 1500
@@ -132,12 +143,17 @@ class RootBridge(private val context: Context) {
             try {
                 val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
                 val ok = json.optString("packageName") == "com.tencent.mm"
-                ok to json.optString("version", "")
+                HookProbe(
+                    connected = ok,
+                    version = json.optString("version", ""),
+                    configured = ok && json.optBoolean("configSupported", false),
+                    error = json.optString("configError", "")
+                )
             } finally {
                 connection.disconnect()
             }
         } catch (_: Exception) {
-            false to ""
+            HookProbe(false)
         }
     }
 

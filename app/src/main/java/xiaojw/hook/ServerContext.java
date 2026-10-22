@@ -43,6 +43,8 @@ public class ServerContext {
     public int currentUserId;
     public int httpPort;
     public String versionName;
+    public boolean configSupported;
+    public String configError;
     public String j1, c, a1, a7;
     public String j1StaticMethod, j1InstanceMethod;
     public String jsonString;

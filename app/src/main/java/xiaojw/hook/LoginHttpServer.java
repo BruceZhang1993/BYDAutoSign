@@ -70,6 +70,8 @@ public class LoginHttpServer extends NanoHTTPD {
                 info.put("userId", ctx.currentUserId);
                 info.put("port", ctx.httpPort);
                 info.put("version", ctx.versionName);
+                info.put("configSupported", ctx.configSupported);
+                info.put("configError", ctx.configError);
                 info.put("j1", ctx.j1);
                 info.put("c", ctx.c);
                 info.put("a1", ServerContext.COMMON_PACKAGE + "." + ctx.a1);

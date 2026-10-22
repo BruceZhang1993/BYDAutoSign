@@ -69,13 +69,19 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             "8.0.71": {"j1": "tk0.j1", "c": "oj0.c", "a1": "plugin.appbrand.jsapi.auth.h2", "a7": "plugin.appbrand.jsapi.auth.l2"},
             "8.0.72": {"j1": "dl0.k1", "c": "yj0.c", "a1": "plugin.appbrand.jsapi.auth.h2", "a7": "plugin.appbrand.jsapi.auth.l2"},
             "8.0.74": {"j1": "gm0.j1", "c": "bl0.c", "a1": "plugin.appbrand.jsapi.auth.h2", "a7": "plugin.appbrand.jsapi.auth.l2"},
-            "8.0.76": {"j1": "hm0.j1", "c": "cl0.c", "a1": "plugin.appbrand.jsapi.auth.i2", "a7": "plugin.appbrand.jsapi.auth.m2"}
+            "8.0.76": {"j1": "hm0.j1", "c": "cl0.c", "a1": "plugin.appbrand.jsapi.auth.i2", "a7": "plugin.appbrand.jsapi.auth.m2"},
+            "8.0.77": {"j1": "ho0.j1", "c": "cn0.c", "a1": "plugin.appbrand.jsapi.auth.i2", "a7": "plugin.appbrand.jsapi.auth.m2", "j1_static_method": "e"},
+            "8.0.78": {"j1": "gp0.j1", "c": "bo0.c", "a1": "plugin.appbrand.jsapi.auth.i2", "a7": "plugin.appbrand.jsapi.auth.m2", "j1_static_method": "e"},
+            "8.0.79": {"j1": "pp0.i1", "c": "ko0.c", "a1": "plugin.appbrand.jsapi.auth.i2", "a7": "plugin.appbrand.jsapi.auth.m2", "j1_static_method": "e"}
         }""";
 
-    private String j1 = "of0.j1";
-    private String c = "he0.c";
-    private String a1 = "plugin.appbrand.jsapi.auth.h2";
-    private String a7 = "plugin.appbrand.jsapi.auth.l2";
+    // Never silently fall back to the 8.0.62 mapping for newer/unknown WeChat releases.
+    private String j1 = "";
+    private String c = "";
+    private String a1 = "";
+    private String a7 = "";
+    private volatile boolean configSupported = false;
+    private volatile String configError = "";
     // 内置默认配置原文，永不修改——用于与用户持久化配置合并
     private String defaultConfigJson;
     private String j1StaticMethod = "d";
@@ -476,26 +482,39 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                     }
                     // 再加载版本特定配置（覆盖公共配置）
                     JSONObject verCfg = rootCfg.optJSONObject(versionName);
-                    if (verCfg != null) {
-                        j1 = verCfg.optString("j1", j1);
-                        c = verCfg.optString("c", c);
-                        a1 = verCfg.optString("a1", a1);
-                        a7 = verCfg.optString("a7", a7);
-                        // 版本配置可覆盖公共配置中的方法名
+                    if (verCfg != null
+                            && !verCfg.optString("j1", "").isEmpty()
+                            && !verCfg.optString("c", "").isEmpty()
+                            && !verCfg.optString("a1", "").isEmpty()
+                            && !verCfg.optString("a7", "").isEmpty()) {
+                        j1 = verCfg.optString("j1");
+                        c = verCfg.optString("c");
+                        a1 = verCfg.optString("a1");
+                        a7 = verCfg.optString("a7");
                         j1StaticMethod = verCfg.optString("j1_static_method", j1StaticMethod);
                         j1InstanceMethod = verCfg.optString("j1_instance_method", j1InstanceMethod);
-                        XposedBridge.log(TAG + " 版本配置加载成功: " + verCfg);
+                        configSupported = true;
+                        configError = "";
+                        XposedBridge.log(TAG + " 微信 " + versionName + " Hook 映射: j1=" + j1
+                                + " c=" + c + " static=" + j1StaticMethod
+                                + " instance=" + j1InstanceMethod);
                     } else {
-                        XposedBridge.log(TAG + " 版本配置不存在，使用默认配置");
+                        configSupported = false;
+                        configError = "微信 " + versionName + " 尚无完整的 Hook 适配配置；"
+                                + "请更新 BYD Auto Sign 或为该微信版本添加映射，然后重启微信";
+                        XposedBridge.log(TAG + " " + configError);
                     }
                 } catch (Exception e) {
-                    XposedBridge.log(TAG + " 版本配置加载失败: " + e.getMessage());
+                    configSupported = false;
+                    configError = "无法加载微信 " + versionName + " 的 Hook 配置："
+                            + e.getClass().getSimpleName();
+                    XposedBridge.log(TAG + " " + configError);
                 }
                 try {
                     ServerContext serverContext = buildServerContext();
                     httpServer = new LoginHttpServer(serverContext, httpPort, classLoader);
                     httpServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false);
-                    XposedBridge.log(TAG + " HTTP服务启动成功 http://0.0.0.0:" + httpPort);
+                    XposedBridge.log(TAG + " 本地 HTTP 服务启动成功 127.0.0.1:" + httpPort);
                     // 本地注册自己到内存实例表
                     registerInstanceInMemory(currentPackageName, currentUserId, httpPort, versionName);
                     // 非主端口实例：向主端口(8088)发送注册通知，由主端口汇总所有端口
@@ -516,6 +535,9 @@ public class WxLoginHook implements IXposedHookLoadPackage {
      * 执行小程序登录，获取code
      */
     public String doLogin(final String str, ClassLoader classLoader) {
+        if (!configSupported) {
+            return hookErrorJson(-310, "HOOK_VERSION_UNSUPPORTED", configError);
+        }
         if (!isLoginInFlight.compareAndSet(false, true)) {
             return "{\"err\":-100,\"msg\":\"登录请求正在处理中\"}";
         }
@@ -523,11 +545,12 @@ public class WxLoginHook implements IXposedHookLoadPackage {
         try {
             final long timeoutMs = 30000;
             XposedBridge.log(TAG + " doLogin 前台Service运行=" + isForegroundServiceRunning + " 超时=" + timeoutMs + "ms");
-            Class<?> LoginTaskCls = XposedHelpers.findClass("com.tencent.mm.plugin.appbrand.jsapi.auth.JsApiLogin$LoginTask", classLoader);
-            Class<?> h2Cls = XposedHelpers.findClass(ServerContext.COMMON_PACKAGE + "." + this.a1, classLoader);
-            Class<?> l2Cls = XposedHelpers.findClass(ServerContext.COMMON_PACKAGE + "." + this.a7, classLoader);
-            Class<?> cCls = XposedHelpers.findClass(this.c, classLoader);
-            Class<?> j1Cls = XposedHelpers.findClass(this.j1, classLoader);
+            Class<?> LoginTaskCls = requireMappedClass("LoginTask",
+                    "com.tencent.mm.plugin.appbrand.jsapi.auth.JsApiLogin$LoginTask", classLoader);
+            Class<?> h2Cls = requireMappedClass("a1", qualifyAuthClass(this.a1), classLoader);
+            Class<?> l2Cls = requireMappedClass("a7", qualifyAuthClass(this.a7), classLoader);
+            Class<?> cCls = requireMappedClass("c", this.c, classLoader);
+            Class<?> j1Cls = requireMappedClass("j1", this.j1, classLoader);
             XposedBridge.log(TAG + " a1=" + ServerContext.COMMON_PACKAGE + "." + this.a1 + " a7=" + ServerContext.COMMON_PACKAGE + "." + this.a7);
             XposedBridge.log(TAG + " 发起登录 appId=" + str);
             // 后台时确保前台 Service 就绪，避免网络请求被 Doze 限流
@@ -603,6 +626,9 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                 }
             }
             if (res[0] == null) res[0] = "{\"err\":-210,\"msg\":\"登录超时\"}";
+        } catch (HookMappingException e) {
+            XposedBridge.log(TAG + " 微信 " + versionName + " Hook 版本适配失败: " + e.getMessage());
+            res[0] = hookErrorJson(-311, "HOOK_CLASS_NOT_FOUND", e.getMessage());
         } catch (Throwable e) {
             XposedBridge.log(TAG + " doLogin异常:" + e.getMessage());
             String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage().replace("\"", "\\\"");
@@ -611,6 +637,37 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             isLoginInFlight.set(false);
         }
         return res[0];
+    }
+
+    private static final class HookMappingException extends RuntimeException {
+        HookMappingException(String message) { super(message); }
+    }
+
+    private String qualifyAuthClass(String name) {
+        if (name.startsWith(ServerContext.COMMON_PACKAGE + ".")) return name;
+        return ServerContext.COMMON_PACKAGE + "." + name;
+    }
+
+    private Class<?> requireMappedClass(String role, String name, ClassLoader loader) {
+        Class<?> mapped = XposedHelpers.findClassIfExists(name, loader);
+        if (mapped == null) {
+            throw new HookMappingException("微信 " + versionName + " 无法找到 " + role
+                    + " 的类 " + name + "；当前映射可能不匹配安装的微信版本，请更新配置并重启微信");
+        }
+        return mapped;
+    }
+
+    private String hookErrorJson(int code, String type, String message) {
+        try {
+            return new JSONObject()
+                    .put("err", code)
+                    .put("errorType", type)
+                    .put("version", versionName)
+                    .put("msg", message)
+                    .toString();
+        } catch (Exception ignored) {
+            return "{\"err\":-310,\"msg\":\"Hook version unsupported\"}";
+        }
     }
 
     /**
@@ -733,6 +790,8 @@ public class WxLoginHook implements IXposedHookLoadPackage {
         ctx.currentUserId = currentUserId;
         ctx.httpPort = httpPort;
         ctx.versionName = versionName;
+        ctx.configSupported = this.configSupported;
+        ctx.configError = this.configError;
         ctx.j1 = this.j1;
         ctx.c = this.c;
         ctx.a1 = this.a1;

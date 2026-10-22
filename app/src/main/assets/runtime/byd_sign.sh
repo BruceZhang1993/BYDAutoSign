@@ -513,6 +513,11 @@ main() {
     fi
 
     log "== 比亚迪${mode}签到结束"
+
+    # A manual invocation must not report success when every account failed.
+    # Also surface partial failures to the UI while keeping per-port success state.
+    [ "$fail_count" -eq 0 ] || return 1
+    return 0
 }
 
 main "$@"

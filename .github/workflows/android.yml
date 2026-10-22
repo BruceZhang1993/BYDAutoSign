@@ -25,6 +25,8 @@ jobs:
           sh -n app/src/main/assets/runtime/root-install.sh
           sh -n app/src/main/assets/runtime/byd_sign.sh
           sh -n app/src/main/assets/runtime/lib.sh
+      - name: Validate wxcode version mappings
+        run: python3 scripts/check-hook-config.py
       - name: Build and test
         run: bash ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
       - name: Inspect single-APK payload

@@ -89,9 +89,16 @@ private fun Dashboard(bridge: RootBridge) {
                     HealthLine("Root 运行环境", state.rootRuntimeInstalled,
                         if (state.rootRuntimeInstalled) "已部署到 /data/adb/byd_sign" else "需要初始化")
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    HealthLine("微信 Hook", state.hookConnected,
-                        if (state.hookConnected) "已连接 · 微信 " + state.hookVersion else
-                            "未连接：请检查 LSPosed 作用域并启动微信")
+                    HealthLine("微信 Hook", state.hookConnected && state.hookConfigured,
+                        if (!state.hookConnected) "未连接：请检查 LSPosed 作用域并启动微信"
+                        else if (!state.hookConfigured) "微信 " + state.hookVersion + "：版本映射未就绪"
+                        else "已连接 · 微信 " + state.hookVersion)
+                    if (state.hookConnected && !state.hookConfigured) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(state.hookError.ifBlank { "当前微信版本没有可用的 Hook 映射，请更新模块并重启微信。" },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error)
+                    }
                     Spacer(Modifier.height(10.dp))
                     Text(state.diagnostic, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
