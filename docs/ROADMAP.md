@@ -83,3 +83,17 @@
 - [x] 会话失效显示重新授权，而不是自动隐式拉起微信
 - [ ] 真机确认 BYD session 跨天/跨重启有效性与服务器过期信号
 - [ ] 根据验证结果决定是否需要独立的定期授权刷新机制，不混入签到任务
+
+## Stage 2 IPC 技术研究（2026-10-22）
+
+详细方案见 [IPC_RESEARCH.md](IPC_RESEARCH.md)。该文档是**设计与 POC 计划**，不代表 IPC 已实现或经真机验证。
+
+- [x] 审阅现有 Hook / localhost HTTP / Root 授权链
+- [x] 对比 Binder AIDL、Messenger、ContentProvider、Root Unix socket 等路径
+- [x] 选定「微信 Hook 反向注册到模块 APK Service，再通过 Binder 回调取 code」为主用户候选架构
+- [ ] POC A：仅做 Binder 注册与 Ping/Pong，不传真实 code
+- [ ] POC B：实现带鉴权/超时的异步 code 回调，仍不切换现有签到
+- [ ] POC C：将一次性 code 经 Root stdin 兑换 session，正式切换后移除无鉴权 HTTP
+- [ ] 多 User/系统分身绑定能力验证与跨用户 fallback 选型
+
+> 上述研究刻意不触及第一阶段业务回归或已投入使用的 HTTP/Shell 工作流。
