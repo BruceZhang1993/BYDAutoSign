@@ -208,10 +208,17 @@ class RootBridge(private val context: Context) {
         } else ShellResult(1, "尚未部署")
         val cronLegacy = scheduler.output.contains("CRON_LEGACY")
         val cronOk = scheduler.ok && scheduler.output.lineSequence().any { it.trim() == "CRON_RUNNING" }
+        val cronError = if (installed && !cronOk && !cronLegacy) {
+            shell("tail -n 20 /data/adb/byd_sign/logs/scheduler.log 2>/dev/null", 10)
+                .output.lineSequence().lastOrNull { it.contains("CRON_ERROR:") }
+                ?.substringAfter("CRON_ERROR:")?.trim()?.take(160).orEmpty()
+        } else ""
         val cronSummary = when {
             !installed -> "先部署 Root 环境"
             cronLegacy -> "调度脚本版本较旧，请先点击“重新部署 Root 环境”"
-            !cronOk -> "定时服务未运行，请点击“修复定时调度”"
+            !cronOk -> if (cronError.isNotBlank()) {
+                "定时服务未运行：" + cronError
+            } else "定时服务未运行，请点击“修复定时调度”"
             !scheduler.output.contains("byd_sign.sh") -> "crond 运行中，但任务表没有签到命令"
             else -> "crond 运行中 · 默认 00:01 / 07:01 / 13:01 / 22:01（以任务表为准）"
         }
