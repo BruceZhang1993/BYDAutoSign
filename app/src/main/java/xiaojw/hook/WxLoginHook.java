@@ -82,6 +82,13 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     private String a7 = "";
     private volatile boolean configSupported = false;
     private volatile String configError = "";
+    private final Object probeLock = new Object();
+    private volatile boolean probeRunning = false;
+    private volatile String probeStatus = "未执行 DEX 探测";
+    private volatile String configSource = "unknown";
+    private volatile String dexFingerprint = "";
+    private volatile boolean codeVerified = false;
+    private volatile long lastProbeStartedAt = 0;
     // 内置默认配置原文，永不修改——用于与用户持久化配置合并
     private String defaultConfigJson;
     private String j1StaticMethod = "d";
@@ -495,6 +502,7 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                         j1InstanceMethod = verCfg.optString("j1_instance_method", j1InstanceMethod);
                         configSupported = true;
                         configError = "";
+                        configSource = "builtin";
                         XposedBridge.log(TAG + " 微信 " + versionName + " Hook 映射: j1=" + j1
                                 + " c=" + c + " static=" + j1StaticMethod
                                 + " instance=" + j1InstanceMethod);
@@ -510,6 +518,10 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                             + e.getClass().getSimpleName();
                     XposedBridge.log(TAG + " " + configError);
                 }
+                // DEX discovery is deliberately off the WeChat main thread.
+                // It also verifies that the pinned version mapping still matches
+                // the actual loaded classes rather than trusting the version alone.
+                scheduleProbe(false);
                 try {
                     ServerContext serverContext = buildServerContext();
                     httpServer = new LoginHttpServer(serverContext, httpPort, classLoader);
@@ -536,7 +548,21 @@ public class WxLoginHook implements IXposedHookLoadPackage {
      */
     public String doLogin(final String str, ClassLoader classLoader) {
         if (!configSupported) {
-            return hookErrorJson(-310, "HOOK_VERSION_UNSUPPORTED", configError);
+            scheduleProbe(false);
+            synchronized (probeLock) {
+                long end = System.currentTimeMillis() + 25000L;
+                while (!configSupported && probeRunning && System.currentTimeMillis() < end) {
+                    try { probeLock.wait(Math.max(1L, end - System.currentTimeMillis())); }
+                    catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            if (!configSupported) {
+                return hookErrorJson(-310, "HOOK_MAPPING_NOT_READY",
+                        configError + "；DEX: " + probeStatus);
+            }
         }
         if (!isLoginInFlight.compareAndSet(false, true)) {
             return "{\"err\":-100,\"msg\":\"登录请求正在处理中\"}";
@@ -608,6 +634,12 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                             String type = classifyCode(rawCode);
                             res[0] = String.format("{\"err\":0,\"msg\":\"success\",\"appId\":\"%s\",\"status\":\"%s\",\"code\":\"%s\",\"codeType\":\"%s\",\"codeLength\":%d}",
                                     str, code, rawCode, type, rawCode == null ? 0 : rawCode.length());
+                            if (rawCode != null && !rawCode.isEmpty() && !"null".equals(rawCode)
+                                    && "dynamic".equals(configSource)) {
+                                HookMap.markCodeVerified(appContext, dexFingerprint);
+                                codeVerified = true;
+                                syncServerContext();
+                            }
                             lockObj.notify();
                         } catch (Throwable e) {
                             XposedBridge.log(TAG + " 轮询异常[" + e.getClass().getSimpleName() + "]:" + e.getMessage());
@@ -627,6 +659,9 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             }
             if (res[0] == null) res[0] = "{\"err\":-210,\"msg\":\"登录超时\"}";
         } catch (HookMappingException e) {
+            configError = e.getMessage();
+            configSupported = false;
+            scheduleProbe(true);
             XposedBridge.log(TAG + " 微信 " + versionName + " Hook 版本适配失败: " + e.getMessage());
             res[0] = hookErrorJson(-311, "HOOK_CLASS_NOT_FOUND", e.getMessage());
         } catch (Throwable e) {
@@ -637,6 +672,152 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             isLoginInFlight.set(false);
         }
         return res[0];
+    }
+
+    // Automatic discovery, structural verification and fingerprint-scoped cache.
+    // No DEX scan is ever performed synchronously during Application.attach().
+    private void scheduleProbe(boolean force) {
+        if (appContext == null) return;
+        synchronized (probeLock) {
+            if (probeRunning) return;
+            long now = System.currentTimeMillis();
+            // Rate-limit expensive forced scans; avoid repeated local HTTP abuse.
+            if (force && now - lastProbeStartedAt < 20000L) return;
+            // A pinned configuration still gets a structural check in the worker.
+            probeRunning = true;
+            lastProbeStartedAt = now;
+            probeStatus = force ? "手动/失败重探中" : "正在检查并适配当前 DEX";
+        }
+        new Thread(() -> {
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                String fingerprint = HookMap.fingerprint(appContext);
+                if (fingerprint.isEmpty()) throw new IllegalStateException("无法生成有效 DEX 指纹");
+                dexFingerprint = fingerprint;
+
+                // For a known version, first cheaply validate without scanning its DEX.
+                if (!force && configSupported) {
+                    JSONObject current = currentMapping();
+                    StringBuilder diagnostic = new StringBuilder();
+                    if (HookMap.validate(current, appContext.getClassLoader(), diagnostic)) {
+                        configSource = "builtin";
+                        probeStatus = "内置映射结构校验通过";
+                        configError = "";
+                        syncServerContext();
+                        return;
+                    }
+                    XposedBridge.log(TAG + " 内置 Hook 映射结构失效: " + diagnostic);
+                    configSupported = false;
+                    configError = "内置映射已失效：" + diagnostic;
+                }
+
+                if (!force) {
+                    JSONObject cached = HookMap.load(appContext, fingerprint);
+                    if (cached != null) {
+                        StringBuilder diagnostic = new StringBuilder();
+                        if (HookMap.validate(cached, appContext.getClassLoader(), diagnostic)) {
+                            applyMapping(cached, "dynamic", HookMap.codeVerified(appContext, fingerprint));
+                            probeStatus = "DEX 缓存命中，" + (codeVerified ? "已取码验证" : "待取码验证");
+                            return;
+                        }
+                        XposedBridge.log(TAG + " 已缓存 Hook 映射失效: " + diagnostic);
+                    }
+                }
+
+                DexProbe.Outcome result = DexProbe.probe(appContext, versionName);
+                if (!result.ok || result.fragmentJson == null) {
+                    configSupported = false;
+                    configError = result.reason == null ? "DEX 解析失败" : result.reason;
+                    probeStatus = "DEX 探测失败：" + configError;
+                    return;
+                }
+                JSONObject mapping = new JSONObject(result.fragmentJson).optJSONObject(versionName);
+                StringBuilder diagnostic = new StringBuilder();
+                if (!HookMap.validate(mapping, appContext.getClassLoader(), diagnostic)) {
+                    configSupported = false;
+                    configError = "DEX 结构校验失败：" + diagnostic;
+                    probeStatus = configError;
+                    return;
+                }
+                if (!fingerprint.equals(HookMap.fingerprint(appContext))) {
+                    configSupported = false;
+                    configError = "探测时 DEX 已变化，请重试";
+                    probeStatus = configError;
+                    return;
+                }
+                HookMap.save(appContext, fingerprint, mapping);
+                applyMapping(mapping, "dynamic", false);
+                probeStatus = "DEX 发现成功（结构通过，等待实际取码验证）";
+            } catch (Throwable error) {
+                if (!configSupported) configError = "动态探测异常：" + error.getClass().getSimpleName();
+                probeStatus = "DEX 探测异常：" + error.getClass().getSimpleName()
+                        + ": " + error.getMessage();
+                XposedBridge.log(TAG + " " + probeStatus);
+            } finally {
+                synchronized (probeLock) {
+                    probeRunning = false;
+                    probeLock.notifyAll();
+                }
+                syncServerContext();
+            }
+        }, "byd-dex-probe-" + currentUserId).start();
+    }
+
+    private synchronized JSONObject currentMapping() {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("j1", j1).put("c", c).put("a1", a1).put("a7", a7);
+            o.put("j1_static_method", j1StaticMethod);
+            o.put("j1_instance_method", j1InstanceMethod);
+        } catch (Exception ignored) { }
+        return o;
+    }
+
+    private synchronized void applyMapping(JSONObject o, String source, boolean verified) {
+        j1 = o.optString("j1");
+        c = o.optString("c");
+        a1 = o.optString("a1");
+        a7 = o.optString("a7");
+        j1StaticMethod = o.optString("j1_static_method", "d");
+        j1InstanceMethod = o.optString("j1_instance_method", "g");
+        configSource = source;
+        configSupported = true;
+        configError = "";
+        codeVerified = verified;
+        syncServerContext();
+        XposedBridge.log(TAG + " DEX Hook 映射生效 (" + source + "): "
+                + j1 + " / " + c + " / " + a1 + " / " + a7);
+    }
+
+    private void syncServerContext() {
+        LoginHttpServer server = httpServer;
+        if (server == null) return;
+        ServerContext state = server.getServerContext();
+        if (state == null) return;
+        state.configSupported = configSupported;
+        state.configError = configError;
+        state.j1 = j1;
+        state.c = c;
+        state.a1 = a1;
+        state.a7 = a7;
+        state.j1StaticMethod = j1StaticMethod;
+        state.j1InstanceMethod = j1InstanceMethod;
+    }
+
+    private JSONObject probeStatusJson() {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("version", versionName);
+            out.put("configSupported", configSupported);
+            out.put("configError", configError);
+            out.put("configSource", configSource);
+            out.put("probeRunning", probeRunning);
+            out.put("probeStatus", probeStatus);
+            out.put("codeVerified", codeVerified);
+            out.put("fingerprint", dexFingerprint.length() > 12
+                    ? dexFingerprint.substring(0, 12) : dexFingerprint);
+        } catch (Exception ignored) { }
+        return out;
     }
 
     private static final class HookMappingException extends RuntimeException {
@@ -800,6 +981,14 @@ public class WxLoginHook implements IXposedHookLoadPackage {
         ctx.j1InstanceMethod = this.j1InstanceMethod;
         ctx.jsonString = this.jsonString;
         ctx.methods = new ServerContext.Callback() {
+            @Override
+            public JSONObject getHookStatus() {
+                return WxLoginHook.this.probeStatusJson();
+            }
+            @Override
+            public void triggerProbe() {
+                WxLoginHook.this.scheduleProbe(true);
+            }
             @Override
             public void saveConfig(String configJson) {
                 WxLoginHook.this.saveConfig(configJson);

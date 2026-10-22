@@ -52,3 +52,12 @@ force_foreground_wake=false
 - Root 写入固定路径，文件权限分别为 0700（程序）和 0600（配置）。
 - 本地接口 GET 暴露授权功能是临时技术债，不应接入外网或公开反向代理。
 - curl/OpenSSL 由既有上游源码提供：构建脚本固定 revision、验 Git blob SHA-1；安装不访问网络下载二进制资源。
+
+## DEX 自适配机制
+
+新 `DexProbe` + `JsApiLoginAnalyzer` 在微信的后台工作线程扫描宿主安装包和可枚举的运行时 DEX，优先提取 `JsApiLogin` 的真实构造、调用关系；必要时按结构搜索四类目标。该方案移植并改编自 `linbailo/byd-lsp`（MIT）。
+
+`HookMap` 负责反射结构验证以及 APK、split APK、运行时 DEX 元数据及 ZIP DEX CRC 的 SHA-256 指纹。指纹不变时使用微信私有 SharedPreferences 缓存，取码成功后额外标记 `codeVerified`。缓存与微信进程绑定，不从公网获取。
+`WxLoginHook` 保留内置表快速路径；当映射失效时以单任务形式异步运行扫描。签到取码会限时等待探测，避免返回过时的类名错误。管理应用通过本机 `/whoami` 和 `/probe` 查看进度与触发手动重新探测。
+
+**限制**：结构校验只保证类、构造、提交方法及已知 LoginTask 字段可用；混淆字段语义变化和无法读取的内存 DEX 仍可能导致取码失败。后续需完善字段级 DEX 推断及安全 IPC。

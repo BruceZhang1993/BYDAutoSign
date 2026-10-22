@@ -20,6 +20,10 @@ data class DeviceState(
     val hookVersion: String = "",
     val hookConfigured: Boolean = false,
     val hookError: String = "",
+    val hookSource: String = "",
+    val probeStatus: String = "",
+    val probeRunning: Boolean = false,
+    val codeVerified: Boolean = false,
     val ports: String = "8088",
     val forceForegroundWake: Boolean = false,
     val recentActivity: String = "",
@@ -120,6 +124,10 @@ class RootBridge(private val context: Context) {
             hookVersion = hook.version,
             hookConfigured = hook.configured,
             hookError = hook.error,
+            hookSource = hook.source,
+            probeStatus = hook.status,
+            probeRunning = hook.running,
+            codeVerified = hook.verified,
             ports = parsed.first,
             forceForegroundWake = parsed.second,
             recentActivity = sanitize(logs.output),
@@ -132,8 +140,29 @@ class RootBridge(private val context: Context) {
         val connected: Boolean,
         val version: String = "",
         val configured: Boolean = false,
-        val error: String = ""
+        val error: String = "",
+        val source: String = "",
+        val status: String = "",
+        val running: Boolean = false,
+        val verified: Boolean = false
     )
+
+    suspend fun probeNow(): ShellResult = withContext(Dispatchers.IO) {
+        try {
+            val conn = URL("http://127.0.0.1:8088/probe").openConnection() as HttpURLConnection
+            conn.connectTimeout = 2500
+            conn.readTimeout = 2500
+            try {
+                val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+                ShellResult(0, "DEX 探测任务已请求：" + json.optString("probeStatus", "等待执行") +
+                    "\n探测在微信后台线程运行，请稍后刷新查看结果。")
+            } finally {
+                conn.disconnect()
+            }
+        } catch (error: Exception) {
+            ShellResult(1, "无法请求微信 DEX 探测，请检查 Hook 是否启动：" + error.javaClass.simpleName)
+        }
+    }
 
     private fun checkHook(): HookProbe {
         return try {
@@ -147,7 +176,11 @@ class RootBridge(private val context: Context) {
                     connected = ok,
                     version = json.optString("version", ""),
                     configured = ok && json.optBoolean("configSupported", false),
-                    error = json.optString("configError", "")
+                    error = json.optString("configError", ""),
+                    source = json.optString("configSource", ""),
+                    status = json.optString("probeStatus", ""),
+                    running = json.optBoolean("probeRunning", false),
+                    verified = json.optBoolean("codeVerified", false)
                 )
             } finally {
                 connection.disconnect()

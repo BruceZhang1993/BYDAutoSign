@@ -72,6 +72,12 @@ public class LoginHttpServer extends NanoHTTPD {
                 info.put("version", ctx.versionName);
                 info.put("configSupported", ctx.configSupported);
                 info.put("configError", ctx.configError);
+                JSONObject dynamic = ctx.methods.getHookStatus();
+                info.put("configSource", dynamic.optString("configSource"));
+                info.put("probeRunning", dynamic.optBoolean("probeRunning"));
+                info.put("probeStatus", dynamic.optString("probeStatus"));
+                info.put("codeVerified", dynamic.optBoolean("codeVerified"));
+                info.put("fingerprint", dynamic.optString("fingerprint"));
                 info.put("j1", ctx.j1);
                 info.put("c", ctx.c);
                 info.put("a1", ServerContext.COMMON_PACKAGE + "." + ctx.a1);
@@ -82,6 +88,13 @@ public class LoginHttpServer extends NanoHTTPD {
             } catch (Exception e) {
                 return jsonResponse(Response.Status.INTERNAL_ERROR, buildJsonError(-500, e.getMessage()));
             }
+        }
+
+        // Request a new local DEX analysis. Single-flight + rate-limited in Hook.
+        // Transitional localhost HTTP endpoint; stage 2 will use authenticated IPC.
+        if (uri.equals("/probe")) {
+            ctx.methods.triggerProbe();
+            return jsonResponse(Response.Status.OK, ctx.methods.getHookStatus().toString());
         }
 
         // /register 接口：接收其他分身实例的注册通知，汇聚到内存实例表

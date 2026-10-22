@@ -32,3 +32,19 @@ assert 'configSupported = true' in source and 'configSupported = false' in sourc
 assert 'info.put("configSupported", ctx.configSupported)' in server
 assert '[ "$fail_count" -eq 0 ] || return 1' in script
 print("WeChat 8.0.77–8.0.79 mapping, diagnostics and exit-status checks passed")
+
+# Dynamic DEX resolver is asynchronous, content-keyed, and structurally validated.
+probe = (root / "app/src/main/java/xiaojw/hook/DexProbe.java").read_text(encoding="utf-8")
+analyzer = (root / "app/src/main/java/xiaojw/hook/JsApiLoginAnalyzer.java").read_text(encoding="utf-8")
+mapping = (root / "app/src/main/java/xiaojw/hook/HookMap.java").read_text(encoding="utf-8")
+http = (root / "app/src/main/java/xiaojw/hook/LoginHttpServer.java").read_text(encoding="utf-8")
+assert "JsApiLoginAnalyzer.analyze(ctx, play)" in probe
+assert "forEachDex" in probe and "runtimeDexPaths" in probe
+assert "invoke" in analyzer.lower()
+assert "MessageDigest.getInstance(\"SHA-256\")" in mapping
+assert "getCrc()" in mapping and "lastUpdateTime" in mapping
+assert "hasRequestCtor" in mapping and "hasSubmitChain" in mapping
+assert 'new Thread(() ->' in source and "HookMap.validate" in source
+assert 'probeRunning = false' in source and "probeLock.notifyAll()" in source
+assert 'uri.equals("/probe")' in http
+print("Dynamic DEX analysis, structural gate, cache invalidation and manual probe checks passed")

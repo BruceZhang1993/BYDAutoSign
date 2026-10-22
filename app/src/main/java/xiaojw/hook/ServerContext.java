@@ -65,6 +65,8 @@ public class ServerContext {
      * 从而保持自身方法的 private 可见性，无需对外暴露。
      */
     public interface Callback {
+        org.json.JSONObject getHookStatus();
+        void triggerProbe();
         void saveConfig(String configJson);
         String doLogin(String appId, ClassLoader classLoader);
         JSONArray getMemoryInstances();

@@ -93,11 +93,28 @@ private fun Dashboard(bridge: RootBridge) {
                         if (!state.hookConnected) "未连接：请检查 LSPosed 作用域并启动微信"
                         else if (!state.hookConfigured) "微信 " + state.hookVersion + "：版本映射未就绪"
                         else "已连接 · 微信 " + state.hookVersion)
-                    if (state.hookConnected && !state.hookConfigured) {
+                    if (state.hookConnected) {
                         Spacer(Modifier.height(8.dp))
-                        Text(state.hookError.ifBlank { "当前微信版本没有可用的 Hook 映射，请更新模块并重启微信。" },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error)
+                        val status = if (state.probeRunning) "后台动态探测中"
+                            else if (state.hookSource == "dynamic") {
+                                if (state.codeVerified) "DEX 动态映射 · 已取码验证"
+                                else "DEX 动态映射 · 结构验证通过，等待实际取码"
+                            } else if (state.hookConfigured) "内置映射 · 结构验证通过"
+                            else "当前映射尚未就绪"
+                        Text(status, style = MaterialTheme.typography.bodyMedium)
+                        if (state.probeStatus.isNotBlank()) {
+                            Text(state.probeStatus, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (!state.hookConfigured && state.hookError.isNotBlank()) {
+                            Text(state.hookError, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error)
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedButton(enabled = !busy && !state.probeRunning,
+                            onClick = { execute { bridge.probeNow() } }) {
+                            Text("重新探测微信 DEX")
+                        }
                     }
                     Spacer(Modifier.height(10.dp))
                     Text(state.diagnostic, style = MaterialTheme.typography.bodySmall,
