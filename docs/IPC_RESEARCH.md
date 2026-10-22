@@ -163,3 +163,15 @@ Android 每个 user/profile 有独立的 app UID 和组件可见性。模块只�
 推荐 **AIDL 双向回调**作为主用户 IPC 主路线；分身跨 Android User **不能仅凭主用户 IPC 方案宣称已支持**。先完成完全不涉及真实 code 的 POC A，再进行 B/C；最终移除 HTTP 时保留“授权与签到解耦”的既有语义。
 
 **本文件仅包含代码审阅、官方平台文档调研和拟议设计；没有执行设备级 POC、CI 或回归测试。**
+
+## 9. POC 代码实施记录（2026-10-22）
+
+- **POC A 已编码并通过 GitHub Actions 第 17 次 Android CI 构建**。包含 AIDL、模块 APK 内导出的 Broker Service、微信 Hook 主动绑定/注册、双向 Ping/Pong、Binder death/重连、管理界面状态。
+- **POC B 已编码，仍需 CI 编译及真机验证**：新增 `ICodeResult` 与 `IHookEndpoint.requestLoginCode()`，仅由管理 App 的实验性按钮发起，在微信 Hook 工作线程调用原有 `doLogin()`；Binder callback 通过一次性 requestId、调用 UID 与超时接收 code，不保存或打印。
+- **POC C 实验性接线已编码，仍需 CI 与真机验证**：App 将获得的 code 通过 `su` 进程的 **stdin** 传入 `byd_sign.sh authorize-stdin 8088`，只执行已有 Session 兑换、保存逻辑。普通 `authorize` / `nonauto` / cron 维持旧流程。
+- 实验按钮当前只支持**主微信（本机端口 8088）**，分身跨 User 尚未完成。安装实验 APK 后还需通过管理页重新部署 Root 运行时脚本。
+- 本阶段未验证被 Hook 注入的微信进程在所有 Android 版本/ROM 下能否绑定模块的导出 Service，特别是宿主微信的包可见性限制；**CI 成功不等于真机 IPC 成功，更不等于协议切换完毕**。
+- 目前 Broker 在每个注册 transaction 中验证主用户 `com.tencent.mm` 的真实包 UID，Hook 回调校验模块包 UID；尚未建立官方微信签名证书固定指纹，因此该实现仅为测试功能，不是最终安全加固完成版。正式迁移需要证书信任策略、跨用户方案、严格审查与移除旧 HTTP 暴露面。
+- 现有 `LoginHttpServer` 的无鉴权敏感端点仍在运行，因此**不能把本阶段标记为完成安全 IPC 迁移**。
+
+本阶段按要求跳过真机业务回归验收；仍保留 CI 自带的静态检查与 Android 构建。
