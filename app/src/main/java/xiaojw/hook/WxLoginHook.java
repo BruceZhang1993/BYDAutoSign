@@ -14,19 +14,11 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
-import fi.iki.elonen.NanoHTTPD;
-import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Iterator;
 import java.util.LinkedList;
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.net.URLEncoder;
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 public class WxLoginHook implements IXposedHookLoadPackage {
@@ -34,12 +26,11 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     private static final String TAG = "xiaojw-wxcode";
     private static final String WECHAT_PACKAGE_PREFIX = "com.tencent.mm";
 
-    // SharedPreferences 键名集中管理（与 ServerContext 常量保持一致）
-    private static final String SP_NAME = ServerContext.SP_NAME;
-    private static final String SP_KEY_VERSION_CONFIG = ServerContext.SP_KEY_VERSION_CONFIG;
-    private static final String SP_KEY_POWER_SAVER_MODE = ServerContext.SP_KEY_POWER_SAVER_MODE;
+    // Hook preferences are stored privately within the WeChat user.
+    private static final String SP_NAME = "wxcode_config";
+    private static final String SP_KEY_VERSION_CONFIG = "version_config";
+    private static final String SP_KEY_POWER_SAVER_MODE = "power_saver_mode";
 
-    private LoginHttpServer httpServer;
     private HookIpcClient ipcClient;
     // 用 CAS 保证并发登录请求串行化,避免 check-then-act 竞态
     private final java.util.concurrent.atomic.AtomicBoolean isLoginInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -97,10 +88,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     private static volatile String versionName = "000";
     private static volatile String currentPackageName = "";
     private static volatile int currentUserId = 0;
-    private static volatile int httpPort = 8088;
-    // 内存实例表：跨用户实例通过向主端口注册通知汇聚，无需共享文件系统即可多用户共享
-    private static final java.util.Map<String, JSONObject> instanceMap = new java.util.concurrent.ConcurrentHashMap<>();
-
     /**
      * 判断是否微信包名（系统分身与主应用包名相同）
      */
@@ -171,113 +158,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " 目录解析UID失败: " + e.getMessage());
         }
         return null;
-    }
-
-    /**
-     * 根据 User ID 计算唯一端口，系统分身包名均为 com.tencent.mm
-     */
-    private int calculatePort(int userId) {
-        if (userId <= 0) {
-            XposedBridge.log(TAG + " [" + currentPackageName + "] 端口:8088 UID:" + userId);
-            return 8088;
-        }
-        int port = userId < 100 ? 8088 + userId : 8200 + (userId % 100);
-        XposedBridge.log(TAG + " [" + currentPackageName + "] 端口:" + port + " UID:" + userId);
-        return port;
-    }
-
-    /**
-     * 检查端口是否已被占用（跨进程有效）
-     */
-    private boolean isPortInUse(int port) {
-        try (java.net.ServerSocket socket = new java.net.ServerSocket(port)) {
-            return false;
-        } catch (IOException e) {
-            return true;
-        }
-    }
-
-    /**
-     * 将实例注册到内存实例表（跨用户共享的主要数据源，无需共享文件系统）
-     */
-    private static void registerInstanceInMemory(String packageName, int userId, int port, String version) {
-        try {
-            String key = packageName + "_" + userId;
-            JSONObject item = new JSONObject();
-            item.put("packageName", packageName);
-            item.put("userId", userId);
-            item.put("port", port);
-            item.put("version", version);
-            instanceMap.put(key, item);
-            XposedBridge.log(TAG + " 内存注册实例: " + key + " :" + port);
-        } catch (Exception e) {
-            XposedBridge.log(TAG + " 内存注册失败: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 读取内存实例表，实例注册后不会过期，跟随微信生命周期
-     */
-    private JSONArray getMemoryInstances() {
-        JSONArray result = new JSONArray();
-        for (java.util.Map.Entry<String, JSONObject> entry : instanceMap.entrySet()) {
-            try {
-                result.put(entry.getValue());
-            } catch (Exception ignored) {}
-        }
-        return result;
-    }
-
-    /**
-     * 非主端口实例：向主端口(8088)发送注册通知
-     */
-    private static void notifyMasterRegister(int port, int userId, String version) {
-        new Thread(() -> {
-            HttpURLConnection conn = null;
-            try {
-                String url = "http://127.0.0.1:" + ServerContext.MASTER_PORT + "/register?port=" + port
-                        + "&userId=" + userId
-                        + "&version=" + URLEncoder.encode(version, "UTF-8")
-                        + "&packageName=" + URLEncoder.encode(currentPackageName, "UTF-8");
-                conn = (HttpURLConnection) new URL(url).openConnection();
-                conn.setConnectTimeout(2000);
-                conn.setReadTimeout(2000);
-                conn.setRequestMethod("GET");
-                int code = conn.getResponseCode();
-                XposedBridge.log(TAG + " 向主端口注册完成 HTTP:" + code);
-            } catch (Exception e) {
-                XposedBridge.log(TAG + " 向主端口注册失败(127.0.0.1:" + ServerContext.MASTER_PORT + " 不可达?): " + e.getMessage());
-            } finally {
-                if (conn != null) conn.disconnect();
-            }
-        }).start();
-    }
-
-
-    /**
-     * 非主端口实例：从主端口拉取汇总后的实例列表
-     */
-    private JSONArray fetchMasterInstances() {
-        HttpURLConnection conn = null;
-        try {
-            URL url = new URL("http://127.0.0.1:" + ServerContext.MASTER_PORT + "/instances");
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(2000);
-            conn.setReadTimeout(2000);
-            conn.setRequestMethod("GET");
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"))) {
-                String line;
-                while ((line = reader.readLine()) != null) sb.append(line);
-            }
-            JSONObject obj = new JSONObject(sb.toString());
-            return obj.getJSONArray("instances");
-        } catch (Exception e) {
-            XposedBridge.log(TAG + " 从主端口拉取实例失败: " + e.getMessage());
-            return null;
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
     }
 
     /**
@@ -373,11 +253,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             }
             jsonString = merged.toString();
             XposedBridge.log(TAG + " 版本配置已持久化保存（当前内存中为合并结果）");
-            // 同步更新 ctx.jsonString，确保 HTML 缓存重建时读到最新配置
-            if (httpServer != null && httpServer.getServerContext() != null) {
-                httpServer.getServerContext().jsonString = jsonString;
-                httpServer.getServerContext().configGeneration++;
-            }
         } catch (Exception e) {
             XposedBridge.log(TAG + " 保存版本配置失败: " + e.getMessage());
         }
@@ -429,7 +304,7 @@ public class WxLoginHook implements IXposedHookLoadPackage {
      */
     private void startWorkerThread() {
         if (workerThread != null && workerThread.isAlive()) return;
-        workerThread = new HandlerThread("wxcode_worker_" + httpPort);
+        workerThread = new HandlerThread("byd_hook_worker_" + currentUserId);
         workerThread.start();
         workerHandler = new Handler(workerThread.getLooper());
         XposedBridge.log(TAG + " 工作线程启动成功");
@@ -466,13 +341,12 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                 ClassLoader classLoader = context.getClassLoader();
                 appContext = context;
                 currentUserId = getUserId();
-                httpPort = calculatePort(currentUserId);
                 // 必须在解析版本配置之前加载用户持久化配置，
                 // 否则 jsonString 仍为内置默认值，用户自定义的版本配置不会生效
                 loadSavedConfigs(context);
                 PackageInfo pkgInfo = context.getPackageManager().getPackageInfo(currentPackageName, 0);
                 versionName = pkgInfo.versionName;
-                XposedBridge.log(TAG + " [" + currentPackageName + "] UID:" + currentUserId + " Ver:" + versionName + " Port:" + httpPort);
+                XposedBridge.log(TAG + " [" + currentPackageName + "] User:" + currentUserId + " Ver:" + versionName + " IPC=Binder");
                 
                 try {
                     JSONObject rootCfg = new JSONObject(jsonString);
@@ -518,33 +392,14 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                 // It also verifies that the pinned version mapping still matches
                 // the actual loaded classes rather than trusting the version alone.
                 scheduleProbe(false);
-                // Binder POC registration is independent of HTTP port allocation.
-                // Keep the existing working HTTP path until a real device confirms
-                // the new IPC link; registration itself never requests a login code.
+                // Binder connects from the injected WeChat context, never via HTTP.
                 if (ipcClient == null) {
-                    ipcClient = new HookIpcClient(context, appId -> doLogin(appId, classLoader));
+                    ipcClient = new HookIpcClient(context, appId -> doLogin(appId, classLoader),
+                        new HookIpcClient.StatusAction() {
+                            @Override public String getStatus() { return probeStatusJson().toString(); }
+                            @Override public void reprobe() { scheduleProbe(true); }
+                        });
                     ipcClient.start();
-                }
-                if (isPortInUse(httpPort)) {
-                    XposedBridge.log(TAG + " HTTP端口 " + httpPort + " 已占用，但Binder IPC仍可注册");
-                    return;
-                }
-                try {
-                    ServerContext serverContext = buildServerContext();
-                    httpServer = new LoginHttpServer(serverContext, httpPort, classLoader);
-                    httpServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false);
-                    XposedBridge.log(TAG + " 本地 HTTP 服务启动成功 127.0.0.1:" + httpPort);
-                    // 本地注册自己到内存实例表
-                    registerInstanceInMemory(currentPackageName, currentUserId, httpPort, versionName);
-                    // 非主端口实例：向主端口(8088)发送注册通知，由主端口汇总所有端口
-                    if (httpPort != ServerContext.MASTER_PORT) {
-                        notifyMasterRegister(httpPort, currentUserId, versionName);
-                    } else {
-                        XposedBridge.log(TAG + " 当前即主端口(8088)，负责汇总所有实例");
-                    }
-                    startKeepAlive();
-                } catch (IOException e) {
-                    XposedBridge.log(TAG + " HTTP服务启动失败:" + e.getMessage());
                 }
             }
         });
@@ -584,7 +439,7 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             Class<?> l2Cls = requireMappedClass("a7", qualifyAuthClass(this.a7), classLoader);
             Class<?> cCls = requireMappedClass("c", this.c, classLoader);
             Class<?> j1Cls = requireMappedClass("j1", this.j1, classLoader);
-            XposedBridge.log(TAG + " a1=" + ServerContext.COMMON_PACKAGE + "." + this.a1 + " a7=" + ServerContext.COMMON_PACKAGE + "." + this.a7);
+            XposedBridge.log(TAG + " a1=" + WECHAT_PACKAGE_PREFIX + "." + this.a1 + " a7=" + WECHAT_PACKAGE_PREFIX + "." + this.a7);
             XposedBridge.log(TAG + " 发起登录 appId=" + str);
             // 后台时确保前台 Service 就绪，避免网络请求被 Doze 限流
             ensureForegroundForBackground();
@@ -645,7 +500,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                                     && "dynamic".equals(configSource)) {
                                 HookMap.markCodeVerified(appContext, dexFingerprint);
                                 codeVerified = true;
-                                syncServerContext();
                             }
                             lockObj.notify();
                         } catch (Throwable e) {
@@ -710,7 +564,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                         configSource = "builtin";
                         probeStatus = "内置映射结构校验通过";
                         configError = "";
-                        syncServerContext();
                         return;
                     }
                     XposedBridge.log(TAG + " 内置 Hook 映射结构失效: " + diagnostic);
@@ -765,7 +618,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                     probeRunning = false;
                     probeLock.notifyAll();
                 }
-                syncServerContext();
             }
         }, "byd-dex-probe-" + currentUserId).start();
     }
@@ -791,30 +643,16 @@ public class WxLoginHook implements IXposedHookLoadPackage {
         configSupported = true;
         configError = "";
         codeVerified = verified;
-        syncServerContext();
         XposedBridge.log(TAG + " DEX Hook 映射生效 (" + source + "): "
                 + j1 + " / " + c + " / " + a1 + " / " + a7);
-    }
-
-    private void syncServerContext() {
-        LoginHttpServer server = httpServer;
-        if (server == null) return;
-        ServerContext state = server.getServerContext();
-        if (state == null) return;
-        state.configSupported = configSupported;
-        state.configError = configError;
-        state.j1 = j1;
-        state.c = c;
-        state.a1 = a1;
-        state.a7 = a7;
-        state.j1StaticMethod = j1StaticMethod;
-        state.j1InstanceMethod = j1InstanceMethod;
     }
 
     private JSONObject probeStatusJson() {
         JSONObject out = new JSONObject();
         try {
             out.put("version", versionName);
+            out.put("packageName", currentPackageName);
+            out.put("userId", currentUserId);
             out.put("configSupported", configSupported);
             out.put("configError", configError);
             out.put("configSource", configSource);
@@ -832,8 +670,8 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     }
 
     private String qualifyAuthClass(String name) {
-        if (name.startsWith(ServerContext.COMMON_PACKAGE + ".")) return name;
-        return ServerContext.COMMON_PACKAGE + "." + name;
+        if (name.startsWith(WECHAT_PACKAGE_PREFIX + ".")) return name;
+        return WECHAT_PACKAGE_PREFIX + "." + name;
     }
 
     private Class<?> requireMappedClass(String role, String name, ClassLoader loader) {
@@ -969,74 +807,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 构建 ServerContext，将当前实例的字段和方法注入到回调接口中，
-     * 供 LoginHttpServer 解耦使用。
-     */
-    private ServerContext buildServerContext() {
-        ServerContext ctx = new ServerContext();
-        ctx.currentPackageName = currentPackageName;
-        ctx.currentUserId = currentUserId;
-        ctx.httpPort = httpPort;
-        ctx.versionName = versionName;
-        ctx.configSupported = this.configSupported;
-        ctx.configError = this.configError;
-        ctx.j1 = this.j1;
-        ctx.c = this.c;
-        ctx.a1 = this.a1;
-        ctx.a7 = this.a7;
-        ctx.j1StaticMethod = this.j1StaticMethod;
-        ctx.j1InstanceMethod = this.j1InstanceMethod;
-        ctx.jsonString = this.jsonString;
-        ctx.methods = new ServerContext.Callback() {
-            @Override
-            public JSONObject getHookStatus() {
-                return WxLoginHook.this.probeStatusJson();
-            }
-            @Override
-            public void triggerProbe() {
-                WxLoginHook.this.scheduleProbe(true);
-            }
-            @Override
-            public void saveConfig(String configJson) {
-                WxLoginHook.this.saveConfig(configJson);
-            }
-            @Override
-            public String doLogin(String appId, ClassLoader cl) {
-                return WxLoginHook.this.doLogin(appId, cl);
-            }
-            @Override
-            public JSONArray getMemoryInstances() {
-                return WxLoginHook.this.getMemoryInstances();
-            }
-            @Override
-            public JSONArray fetchMasterInstances() {
-                return WxLoginHook.this.fetchMasterInstances();
-            }
-            @Override
-            public void switchPowerMode(boolean powerSaver) {
-                WxLoginHook.this.switchPowerMode(powerSaver);
-            }
-            @Override
-            public void registerInstanceInMemory(String pkg, int uid, int port, String ver) {
-                WxLoginHook.this.registerInstanceInMemory(pkg, uid, port, ver);
-            }
-            @Override
-            public void resetConfig() {
-                WxLoginHook.this.resetConfig();
-            }
-            @Override
-            public String longestCommonPrefix(java.util.List<String> strs) {
-                return WxLoginHook.this.longestCommonPrefix(strs);
-            }
-            @Override
-            public String shortenClass(String s, String prefix) {
-                return WxLoginHook.this.shortenClass(s, prefix);
-            }
-        };
-        return ctx;
-    }
-
-    /**
      * 重置版本配置为默认值（仅移除持久化的用户配置，不影响内置默认配置）
      */
     private void resetConfig() {
@@ -1044,9 +814,5 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                 .edit().remove(SP_KEY_VERSION_CONFIG).commit();
         // 回退到内置默认配置并同步 ctx
         jsonString = defaultConfigJson;
-        if (httpServer != null && httpServer.getServerContext() != null) {
-            httpServer.getServerContext().jsonString = jsonString;
-            httpServer.getServerContext().configGeneration++;
-        }
     }
 }
