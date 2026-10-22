@@ -128,65 +128,10 @@ wake_wechat_silent() {
         return 0
     fi
 
-    log "警告: 仍未确认微信进程启动，继续尝试获取 code"
+    log "警告: 尚未确认微信进程已启动，Binder 授权可能需要重新唤醒"
     return 1
 }
 
-
-# === 统一获取 wx code ===
-# 参数:
-#   $1 = 端口
-#   $2 = appId
-#   $3 = curl 额外参数，可为空。例如: "--connect-timeout 10 --max-time 15"
-#   $4 = 可选，响应内容写入文件路径，便于调用方输出诊断信息
-#
-# 输出:
-#   成功: stdout 输出 code，return 0
-#   失败: stdout 不输出 code，return 1
-#
-# 说明:
-#   这里只统一“请求 /login 并解析 code”的核心逻辑；
-#   是否设置超时由调用方通过第 3 个参数决定，以保留各脚本原有行为。
-get_code_from_api() {
-    local port="$1"
-    local appid="$2"
-    local curl_opts="$3"
-    local response_file="$4"
-
-    if [ -z "$port" ] || [ -z "$appid" ]; then
-        [ -n "$response_file" ] && echo "" > "$response_file"
-        return 1
-    fi
-
-    local curl_bin=$(get_curl_bin)
-    local url="http://127.0.0.1:${port}/login?appId=${appid}"
-    local response=""
-
-    if [ -z "$curl_bin" ] || [ ! -x "$curl_bin" ]; then
-        [ -n "$response_file" ] && echo "错误: 模块 curl 不存在或不可执行: $WORK_DIR/curl" > "$response_file"
-        return 127
-    fi
-
-    # 本地 wxcode 不需要代理；固定 IPv4 可避免部分 ROM 的 localhost/IPv6 异常。
-    if [ -n "$curl_opts" ]; then
-        response=$($curl_bin -sS --noproxy "*" -4 $curl_opts "$url" 2>&1)
-    else
-        response=$($curl_bin -sS --noproxy "*" -4 "$url" 2>&1)
-    fi
-    local curl_ret=$?
-
-    [ -n "$response_file" ] && echo "$response" > "$response_file"
-    [ $curl_ret -ne 0 ] && return $curl_ret
-
-    local code=$(echo "$response" | grep -o '"code"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"code"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/')
-
-    if [ -z "$code" ] || [ "$code" = "" ] || [ "$code" = "nu""ll" ]; then
-        return 1
-    fi
-
-    echo "$code"
-    return 0
-}
 
 # === 读取 CODE_API 端口列表（返回空格分隔的端口号）===
 get_code_api_ports() {
