@@ -101,7 +101,7 @@ private fun Dashboard(bridge: RootBridge) {
                         )
                     }
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    HealthLine("Binder IPC（实验）", state.ipcConnected, state.ipcStatus)
+                    HealthLine("Binder IPC", state.ipcConnected, state.ipcStatus)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     HealthLine("微信 Hook（仅授权阶段需要）", state.hookConnected && state.hookConfigured,
                         if (!state.hookConnected) "未连接：请检查 LSPosed 作用域并启动微信"
@@ -140,15 +140,13 @@ private fun Dashboard(bridge: RootBridge) {
                             onClick = {
                                 execute {
                                     if (state.rootRuntimeInstalled) bridge.deployRuntimeOnly()
-                                    else if (state.ipcConnected) bridge.initializeViaBinder()
                                     else bridge.initialize()
                                 }
                             }
                         ) {
                             Text(
                                 if (state.rootRuntimeInstalled) "重新部署 Root 环境"
-                                else if (state.ipcConnected) "初始化并通过 Binder 授权"
-                                else "初始化并授权（旧通道）"
+                                else "初始化并通过 Binder 授权"
                             )
                         }
                         OutlinedButton(
@@ -162,17 +160,12 @@ private fun Dashboard(bridge: RootBridge) {
                         TextButton(enabled = !busy, onClick = { execute { bridge.deployRuntimeOnly() } }) {
                             Text("仅部署 Root 环境（不授权微信）")
                         }
-                        if (state.ipcConnected) {
-                            Text(
-                                "已验证 Binder Ping/Pong；初始化会先部署 Root 环境，再尝试" +
-                                    "通过 Binder 获取一次性 code，不自动退回 HTTP 通道。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            TextButton(enabled = !busy, onClick = { execute { bridge.initialize() } }) {
-                                Text("使用旧 HTTP 通道初始化（备用）")
-                            }
-                        }
+                        Text(
+                            "初始化部署 Root 调度后，通过 Binder 获取一次性微信 code；" +
+                                "不会使用已移除的本地 HTTP 登录通道。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -196,23 +189,14 @@ private fun Dashboard(bridge: RootBridge) {
                         enabled = state.rootRuntimeInstalled && !busy,
                         onClick = { execute { bridge.authorize() } }
                     ) {
-                        Text("重新授权（旧 HTTP）")
+                        Text("通过 Binder 重新授权")
                     }
-                    if (state.ipcConnected) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedButton(
-                            enabled = state.rootRuntimeInstalled && !busy,
-                            onClick = { execute { bridge.authorizeViaBinder() } }
-                        ) {
-                            Text("通过 Binder 重新授权（实验）")
-                        }
-                        Text(
-                            "仅验证主微信 8088。若从旧版升级，请先点击“重新部署 Root 环境”更新脚本；" +
-                                "再点击此按钮取码。授权成功后会话状态显示“Binder IPC”，签到调度不变。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        "当前 Binder 授权针对主微信（会话槽位 8088）。" +
+                            "如果刚升级，请先更新 Root 环境；跨 User 微信分身仍需单独适配。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
             item {
@@ -238,12 +222,12 @@ private fun Dashboard(bridge: RootBridge) {
                     OutlinedTextField(
                         value = ports,
                         onValueChange = { ports = it },
-                        label = { Text("本地接口端口") },
-                        supportingText = { Text("主微信默认 8088，分身用逗号分隔，例如 8088,8098") },
+                        label = { Text("历史会话槽位（兼容旧数据）") },
+                        supportingText = { Text("当前 Binder 授权仅支持主微信 8088；其他槽位只能使用已有会话") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text("微信唤醒仅用于手动授权。保存新端口后，需要为该实例执行重新授权。",
+                    Text("此设置仅影响 Root 会话/签到槽位，不是 IPC 端口；不能自动开启分身授权。",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(8.dp))
