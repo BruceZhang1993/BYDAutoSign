@@ -17,6 +17,8 @@ data class ShellResult(val exitCode: Int, val output: String) {
 data class DeviceState(
     val rootRuntimeInstalled: Boolean = false,
     val hookConnected: Boolean = false,
+    val ipcConnected: Boolean = false,
+    val ipcStatus: String = "",
     val hookVersion: String = "",
     val hookConfigured: Boolean = false,
     val hookError: String = "",
@@ -136,6 +138,8 @@ class RootBridge(private val context: Context) {
         DeviceState(
             rootRuntimeInstalled = installed,
             hookConnected = hook.connected,
+            ipcConnected = com.brucezhang.bydautosign.ipc.IpcBrokerService.connected(),
+            ipcStatus = com.brucezhang.bydautosign.ipc.IpcBrokerService.diagnostic(),
             hookVersion = hook.version,
             hookConfigured = hook.configured,
             hookError = hook.error,
