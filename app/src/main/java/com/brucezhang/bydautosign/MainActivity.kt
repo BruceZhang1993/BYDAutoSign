@@ -152,6 +152,21 @@ private fun Dashboard(bridge: RootBridge) {
                     ) {
                         Text("重新授权")
                     }
+                    if (state.ipcConnected) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            enabled = state.rootRuntimeInstalled && !busy,
+                            onClick = { execute { bridge.authorizeViaBinder() } }
+                        ) {
+                            Text("通过 Binder 重新授权（实验）")
+                        }
+                        Text(
+                            "仅验证主微信 8088；请先点击“重新部署并授权”安装更新后的 Root 脚本。" +
+                                "本操作仅在主动点击时获取 code，不改变日常自动签到。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
             item {
