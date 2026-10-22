@@ -40,6 +40,7 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     private static final String SP_KEY_POWER_SAVER_MODE = ServerContext.SP_KEY_POWER_SAVER_MODE;
 
     private LoginHttpServer httpServer;
+    private HookIpcClient ipcClient;
     // 用 CAS 保证并发登录请求串行化,避免 check-then-act 竞态
     private final java.util.concurrent.atomic.AtomicBoolean isLoginInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
     private Context appContext;
@@ -466,11 +467,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                 appContext = context;
                 currentUserId = getUserId();
                 httpPort = calculatePort(currentUserId);
-                // 检查端口是否已被占用（防止多进程重复初始化）
-                if (isPortInUse(httpPort)) {
-                    XposedBridge.log(TAG + " 端口 " + httpPort + " 已被占用，跳过初始化");
-                    return;
-                }
                 // 必须在解析版本配置之前加载用户持久化配置，
                 // 否则 jsonString 仍为内置默认值，用户自定义的版本配置不会生效
                 loadSavedConfigs(context);
@@ -522,6 +518,17 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                 // It also verifies that the pinned version mapping still matches
                 // the actual loaded classes rather than trusting the version alone.
                 scheduleProbe(false);
+                // Binder POC registration is independent of HTTP port allocation.
+                // Keep the existing working HTTP path until a real device confirms
+                // the new IPC link; registration itself never requests a login code.
+                if (ipcClient == null) {
+                    ipcClient = new HookIpcClient(context);
+                    ipcClient.start();
+                }
+                if (isPortInUse(httpPort)) {
+                    XposedBridge.log(TAG + " HTTP端口 " + httpPort + " 已占用，但Binder IPC仍可注册");
+                    return;
+                }
                 try {
                     ServerContext serverContext = buildServerContext();
                     httpServer = new LoginHttpServer(serverContext, httpPort, classLoader);
