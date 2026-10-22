@@ -61,10 +61,6 @@ retry_command() {
 }
 
 # 包装函数只负责输出结果；retry_command 会安全地捕获 stdout，不进行二次命令解析。
-_get_code_checked() {
-    get_code "$1" "$2"
-}
-
 _get_session_id_checked() {
     get_session_id "$1" "$2"
 }
@@ -245,35 +241,6 @@ send_request() {
 
 # get_code_api_ports 已定义在 lib.sh 中，本脚本直接使用
 
-get_code() {
-    local port="$1"
-    log "[端口 ${port}] 正在从本地接口获取code..."
-
-    # 统一调用 lib.sh 中的 get_code_from_api。
-    # 正式签到流程保持原行为：不额外设置 connect-timeout / max-time。
-    # curl 选择由 lib.sh 统一处理：优先使用模块内置 $WORK_DIR/curl。
-    local response_file="$WORK_DIR/.code_response_${port}_$$"
-    local code=""
-    code=$(get_code_from_api "$port" "$APPID" "$2" "$response_file")
-    local ret=$?
-    local response=$(cat "$response_file" 2>/dev/null)
-    rm -f "$response_file" 2>/dev/null
-
-    # 检查 code 是否为空或无效值（如 null、空字符串）
-    if [ "$ret" -ne 0 ]; then
-        log "[端口 ${port}] 错误: 本地接口请求失败（详情已隐藏，退出码 $ret）"
-        return 66
-    fi
-    if [ -z "$code" ] || [ "$code" = "null" ]; then
-        log "[端口 ${port}] 错误: 本地接口返回无效 code（详情已隐藏）"
-        return 66
-    fi
-
-    log "[端口 ${port}] 成功获取code（已隐藏敏感内容）"
-    echo "$code"
-    return 0
-}
-
 get_session_id() {
     local code="$1"
     local port="$2"
@@ -446,57 +413,6 @@ session_status() {
     done
 }
 
-# Only explicit authorization may wake WeChat; sign-only never does.
-authorize() {
-    local port code session ok=0 failed=0
-    umask 077
-    mkdir -p "$SESSION_DIR" "$LOG_DIR" || return 1
-    chmod 700 "$SESSION_DIR"
-    log "== 初始化授权开始（允许唤醒微信） =="
-    wake_wechat_silent || true
-    for port in $(get_code_api_ports); do
-        if ! valid_port "$port"; then
-            log "忽略无效端口"
-            failed=$((failed + 1))
-            continue
-        fi
-        log "[端口 ${port}] 请求一次性 code 并兑换会话"
-        if retry_command 2 3 _get_code_checked "$port" "--connect-timeout 6 --max-time 32"; then
-            code="$RETRY_OUTPUT"
-        else
-            # Foreground fallback belongs ONLY to the explicit authorization phase.
-            log "[端口 ${port}] 后台取码失败，尝试前台唤醒微信"
-            am start --activity-no-animation -n com.tencent.mm/.ui.LauncherUI >/dev/null 2>&1 || true
-            sleep 3
-            if retry_command 1 0 _get_code_checked "$port" "--connect-timeout 6 --max-time 32"; then
-                code="$RETRY_OUTPUT"
-            else
-                log "[端口 ${port}] 初始化失败：微信未返回有效 code"
-                failed=$((failed + 1))
-                continue
-            fi
-        fi
-        if ! retry_command 2 4 _get_session_id_checked "$code" "$port"; then
-            code=""
-            log "[端口 ${port}] 初始化失败：无法兑换 BYD 会话"
-            failed=$((failed + 1))
-            continue
-        fi
-        session="$RETRY_OUTPUT"
-        code="" # Never persist code.
-        if save_session "$port" "$session" http; then
-            log "[端口 ${port}] 初始化完成：会话已保存（仅 Root 可读）"
-            ok=$((ok + 1))
-        else
-            log "[端口 ${port}] 初始化失败：会话保存失败"
-            failed=$((failed + 1))
-        fi
-        session=""
-    done
-    log "== 授权结果：成功 ${ok} / 失败 ${failed} =="
-    [ "$failed" -eq 0 ] && [ "$ok" -gt 0 ]
-}
-
 # Experimental Binder handoff: input is a one-time code from stdin, never argv.
 # This path may only be invoked by the user-initiated app authorization action.
 authorize_from_stdin() {
@@ -529,7 +445,6 @@ main() {
     umask 077
     mkdir -p "$LOG_DIR"
     case "$1" in
-        authorize) authorize; return $? ;;
         authorize-stdin) authorize_from_stdin "$2"; return $? ;;
         status) session_status; return 0 ;;
         nonauto|"") ;;
