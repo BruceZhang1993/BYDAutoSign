@@ -25,12 +25,26 @@ jobs:
           sh -n app/src/main/assets/runtime/root-install.sh
           sh -n app/src/main/assets/runtime/byd_sign.sh
           sh -n app/src/main/assets/runtime/lib.sh
+          sh -n app/src/main/assets/runtime/webui_api.sh
       - name: Validate wxcode version mappings
         run: python3 scripts/check-hook-config.py
       - name: Verify authorization/sign-only separation
         run: python3 scripts/check-sign-session.py
       - name: Run unit tests and verify APK packaging
         run: bash ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
+      - name: Inspect single APK payload (not an upload artifact)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          for item in assets/xposed_init assets/runtime/byd_sign.sh assets/runtime/lib.sh assets/runtime/root-install.sh assets/runtime/root-boot.sh; do
+            unzip -Z1 "$APK" | grep -Fx "$item" >/dev/null || { echo "::error::Missing APK asset: $item"; exit 1; }
+          done
+          # The HTTP implementation and dependency must no longer be in source.
+          test ! -e app/src/main/java/xiaojw/hook/LoginHttpServer.java
+          ! grep -Rq 'org.nanohttpd:nanohttpd' app/build.gradle
+          sha256sum "$APK"
 
       # Fork PRs cannot access private signing secrets. They run tests but do
       # not create unsigned or debug artifacts masquerading as installable builds.
