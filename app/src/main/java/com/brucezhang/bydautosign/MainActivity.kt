@@ -182,7 +182,7 @@ private fun Dashboard(bridge: RootBridge) {
                         enabled = state.rootRuntimeInstalled && !busy,
                         onClick = { execute { bridge.authorize() } }
                     ) {
-                        Text("重新授权")
+                        Text("重新授权（旧 HTTP）")
                     }
                     if (state.ipcConnected) {
                         Spacer(Modifier.height(8.dp))
@@ -193,8 +193,8 @@ private fun Dashboard(bridge: RootBridge) {
                             Text("通过 Binder 重新授权（实验）")
                         }
                         Text(
-                            "仅验证主微信 8088；请先点击“重新部署并授权”安装更新后的 Root 脚本。" +
-                                "本操作仅在主动点击时获取 code，不改变日常自动签到。",
+                            "仅验证主微信 8088。若从旧版升级，请先点击“重新部署 Root 环境”更新脚本；" +
+                                "再点击此按钮取码。授权成功后会话状态显示“Binder IPC”，签到调度不变。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
