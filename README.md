@@ -17,7 +17,7 @@
 ## 使用说明
 
 1. 确认设备已有 **Root（Magisk / KernelSU / APatch）**、**LSPosed**，以及已登录的微信。
-2. 在 [Actions](https://github.com/BruceZhang1993/BYDAutoSign/actions) 下载最新成功构建的 `BYDAutoSign-debug` APK 并安装。
+2. 在 [Actions](https://github.com/BruceZhang1993/BYDAutoSign/actions) 下载已签名的原始 `BYDAutoSign-release.apk`（无需解压）并安装。仓库维护者需先配置 [Release 签名 Secrets](docs/RELEASE_SIGNING.md)。
 3. 在 LSPosed 启用 BYD Auto Sign，作用域勾选微信 `com.tencent.mm`，**强制停止后重新启动微信**。
 4. 打开 BYD Auto Sign，授予 Root，点击 **初始化并授权**。安装器会从 APK 内部释放 Shell 运行环境，并注册 service.d 开机任务（无需单独安装 Root 模块 ZIP）。
 5. 确认「会话授权」区域显示已初始化会话，之后点击 **立即签到** 验证。分身用户可在端口框填写 `8088,8098` 等端口并保存。
@@ -34,12 +34,12 @@
 
 ```bash
 bash scripts/prepare-runtime.sh  # 从固定上游版本下载并校验 curl / openssl
-bash ./gradlew :app:testDebugUnitTest :app:assembleDebug
+bash ./gradlew :app:testDebugUnitTest :app:assembleRelease  # 需要配置 Release 签名环境变量
 ```
 
-生成的 APK：`app/build/outputs/apk/debug/app-debug.apk`。**安装 APK 时无需另行下载工具**；下载只发生在构建期。构建脚本使用固定的上游 commit，并校验每个二进制的 Git blob SHA-1。
+生成的已签名 APK：`app/build/outputs/apk/release/app-release.apk`（配置签名环境变量后）。**安装 APK 时无需另行下载工具**；下载只发生在构建期。构建脚本使用固定的上游 commit，并校验每个二进制的 Git blob SHA-1。
 
-CI：`.github/workflows/android.yml` 提供可下载的调试 APK。当前为调试签名，不保证跨设备适用，也不建议将调试包作为正式发行版。
+CI：`.github/workflows/android.yml` 在 GitHub Actions → Artifacts 上传经 `apksigner` 验证的原始 Release APK，使用 `actions/upload-artifact@v7` 和 `archive: false`，不再套 ZIP。发布包使用固定的私有签名证书；仓库管理员必须先配置 [签名 Secrets](docs/RELEASE_SIGNING.md)，否则发布步骤明确失败而不会上传未签名 APK。
 
 ## 项目结构
 
