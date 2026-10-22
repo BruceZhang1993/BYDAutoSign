@@ -15,9 +15,27 @@ android {
         versionName '0.3.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
+    // Use the same private signing key for every release build so Android
+    // upgrades (including LSPosed module updates) retain the same certificate.
+    // Credentials are supplied by GitHub Actions secrets or the local shell.
+    signingConfigs {
+        release {
+            def signingFile = System.getenv('BYD_SIGNING_STORE_FILE')
+            def signingStorePassword = System.getenv('BYD_SIGNING_STORE_PASSWORD')
+            def signingKeyAlias = System.getenv('BYD_SIGNING_KEY_ALIAS')
+            def signingKeyPassword = System.getenv('BYD_SIGNING_KEY_PASSWORD')
+            if (signingFile && signingStorePassword && signingKeyAlias && signingKeyPassword) {
+                storeFile file(signingFile)
+                storePassword signingStorePassword
+                keyAlias signingKeyAlias
+                keyPassword signingKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
         }
     }
     compileOptions {
