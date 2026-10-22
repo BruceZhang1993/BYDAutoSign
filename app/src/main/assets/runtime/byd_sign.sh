@@ -483,163 +483,17 @@ authorize() {
     [ "$failed" -eq 0 ] && [ "$ok" -gt 0 ]
 }
 
-
-# Experimental secure IPC handoff. The one-time code is provided on stdin
-# from the module's explicit Binder authorization UI, never in argv or a file.
-# This subcommand ONLY exchanges and persists the BYD session; it does not
-# contact or wake WeChat. All normal sign-only invocations remain unchanged.
+# Experimental Binder handoff: input is a one-time code from stdin, never argv.
+# This path may only be invoked by the user-initiated app authorization action.
 authorize_from_stdin() {
     local port="$1" code="" session=""
     valid_port "$port" || { log "Binder 授权：端口无效"; return 2; }
-    IFS= read -r code || [ -n "$code" ] || { log "Binder 授权：未收到 code"; return 2; }
-    if [ "${#code}" -lt 6 ] || [ "${#code}" -gt 4096 ] || \
-            ! printf '%s' "$code" | LC_ALL=C grep -Eq '^[a-zA-Z0-9_./+=:%-]+
-    mkdir -p "$LOG_DIR"
-    case "$1" in
-        authorize) authorize; return $? ;;
-        authorize-stdin) authorize_from_stdin "$2"; return $? ;;
-        status) session_status; return 0 ;;
-        nonauto|"") ;;
-        *) log "未知命令"; return 2 ;;
+    IFS= read -r code || [ -n "$code" ] || { log "Binder 授权：没有凭证"; return 2; }
+    [ "${#code}" -ge 6 ] && [ "${#code}" -le 4096 ] || { log "Binder 授权：凭证长度无效"; return 2; }
+    case "$code" in
+        *[!a-zA-Z0-9_+./=:%-]*) code=""; log "Binder 授权：凭证字符无效"; return 2 ;;
     esac
-    auto=false
-    [ "$1" != "nonauto" ] && auto=true
-
-    mode=$([ "$auto" = true ] && echo "自动" || echo "手动")
-    log "== 比亚迪${mode}签到开始"
-
-    clean_old_logs
-
-    # 读取 CODE_API 端口配置
-    local ports=$(get_code_api_ports)
-    if [ -z "$ports" ]; then
-        log "错误: 没有配置任何 CODE_API 端口"
-        send_notification "比亚迪签到失败" "没有配置 CODE_API 端口，签到失败。时间：$(date '+%Y-%m-%d %H:%M:%S')"
-        return 1
-    fi
-    log "配置的 CODE_API 端口: $ports"
-
-    # 统计结果
-    local success_count=0
-    local fail_count=0
-    local skip_count=0
-    local result_details=""
-    local best_days="0"
-
-    for port in $ports; do
-        log ""
-        log "== [端口 ${port}] 开始签到 =="
-
-        # 自动模式下，检查该端口是否已签到
-        if [ "$1" != "nonauto" ] && _is_signed_today "$port"; then
-            log "[端口 ${port}] 今天已经签到，跳过"
-            skip_count=$((skip_count + 1))
-            result_details="${result_details}  - 端口 ${port}: 今日已签到（跳过）\n"
-            log "== [端口 ${port}] 已跳过 =="
-            continue
-        fi
-
-        # Sign-only: never touch WeChat and never exchange a new code.
-        local session_id
-        session_id=$(load_session "$port") || session_id=""
-        if [ -z "$session_id" ]; then
-            log "[端口 ${port}] 尚未初始化会话，请在应用内重新授权"
-            fail_count=$((fail_count + 1))
-            result_details="${result_details}  - 端口 ${port}: 需要重新授权\n"
-            log "== [端口 ${port}] 缺少会话，跳过 =="
-            continue
-        fi
-
-        # 执行签到（网络失败可重试，解密/业务失败快速失败）
-        local sign_output=""
-        if retry_command 2 10 _do_sign_checked "$session_id" "$port"; then
-            sign_output="$RETRY_OUTPUT"
-
-            # 解析签到结果
-            if echo "$sign_output" | grep -q "^SUCCESS"; then
-                local days=$(echo "$sign_output" | cut -d'|' -f2)
-                success_count=$((success_count + 1))
-                if [ "$days" -gt "$best_days" ] 2>/dev/null; then
-                    best_days="$days"
-                fi
-                result_details="${result_details}  - 端口 ${port}: 签到成功 (连续${days}天)\n"
-            else
-                local reason=$(echo "$sign_output" | cut -d'|' -f2)
-                fail_count=$((fail_count + 1))
-                result_details="${result_details}  - 端口 ${port}: ${reason}\n"
-                log "== [端口 ${port}] 签到失败 =="
-                continue
-            fi
-        else
-            if [ "$RETRY_OUTPUT" = "FAILED|AUTH_EXPIRED" ]; then
-                forget_session "$port"
-                result_details="${result_details}  - 端口 ${port}: 会话已过期，请重新授权\n"
-            else
-                result_details="${result_details}  - 端口 ${port}: 签到失败（会话保留）\n"
-            fi
-            fail_count=$((fail_count + 1))
-            log "== [端口 ${port}] 签到失败 =="
-            continue
-        fi
-
-        log "== [端口 ${port}] 签到成功 =="
-        save_sign_success "$port"
-    done
-
-    # 汇总通知
-    log ""
-    local total_ports=$((success_count + fail_count + skip_count))
-    log "== 汇总: 成功 ${success_count} / 失败 ${fail_count} / 跳过 ${skip_count} / 共 ${total_ports} 个端口 =="
-
-    local now_time=$(date '+%Y-%m-%d %H:%M:%S')
-
-    if [ "$success_count" -gt 0 ]; then
-        local notify_msg="签到汇总：${success_count}/${total_ports} 个端口签到成功"
-        if [ "$skip_count" -gt 0 ]; then
-            notify_msg="${notify_msg}，${skip_count} 个已跳过"
-        fi
-        if [ "$fail_count" -gt 0 ]; then
-            notify_msg="${notify_msg}，${fail_count} 个失败"
-        fi
-        notify_msg="${notify_msg}。\n\n详情：\n${result_details}\n时间：${now_time}"
-        if [ "$best_days" != "0" ]; then
-            send_notification "比亚迪签到成功" "签到成功！已连续签到 ${best_days} 天。\n${notify_msg}"
-        else
-            send_notification "比亚迪签到成功" "签到成功！\n${notify_msg}"
-        fi
-        log "签到完成"
-    elif [ "$skip_count" -gt 0 ] && [ "$fail_count" -eq 0 ]; then
-        # 全部已签到，无需操作
-        local notify_msg="签到汇总：所有 ${total_ports} 个端口今日均已签到，跳过。\n\n详情：\n${result_details}\n时间：${now_time}"
-        log "${notify_msg}"
-        log "签到完成（全部已跳过）"
-        # 不发送通知，避免骚扰
-    else
-        local notify_msg="签到汇总：所有 ${total_ports} 个端口"
-        if [ "$skip_count" -gt 0 ] && [ "$fail_count" -gt 0 ]; then
-            notify_msg="${notify_msg}（${skip_count} 已跳过，${fail_count} 失败）"
-        elif [ "$fail_count" -gt 0 ]; then
-            notify_msg="${notify_msg} 均签到失败"
-        fi
-        notify_msg="${notify_msg}。\n\n详情：\n${result_details}\n时间：${now_time}"
-        send_notification "比亚迪签到失败" "${notify_msg}"
-        log "签到完成（无新成功）"
-    fi
-
-    log "== 比亚迪${mode}签到结束"
-
-    # A manual invocation must not report success when every account failed.
-    # Also surface partial failures to the UI while keeping per-port success state.
-    [ "$fail_count" -eq 0 ] || return 1
-    return 0
-}
-
-main "$@"; then
-        log "Binder 授权：code 格式无效"
-        code=""
-        return 2
-    fi
-    log "[端口 ${port}] Binder 授权：兑换 BYD 会话"
+    log "[端口 ${port}] Binder 授权：兑换会话"
     if ! retry_command 2 4 _get_session_id_checked "$code" "$port"; then
         code=""
         log "[端口 ${port}] Binder 授权：会话兑换失败"
@@ -649,11 +503,11 @@ main "$@"; then
     code=""
     if save_session "$port" "$session"; then
         session=""
-        log "[端口 ${port}] Binder 授权成功：会话已持久化"
+        log "[端口 ${port}] Binder 授权成功：会话已保存"
         return 0
     fi
     session=""
-    log "[端口 ${port}] Binder 授权：会话存储失败"
+    log "[端口 ${port}] Binder 授权：保存失败"
     return 1
 }
 
@@ -662,6 +516,7 @@ main() {
     mkdir -p "$LOG_DIR"
     case "$1" in
         authorize) authorize; return $? ;;
+        authorize-stdin) authorize_from_stdin "$2"; return $? ;;
         status) session_status; return 0 ;;
         nonauto|"") ;;
         *) log "未知命令"; return 2 ;;
