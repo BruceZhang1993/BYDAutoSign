@@ -87,6 +87,20 @@ private fun Dashboard(bridge: RootBridge) {
                     HealthLine("Root 运行环境", state.rootRuntimeInstalled,
                         if (state.rootRuntimeInstalled) "已部署到 /data/adb/byd_sign" else "需要初始化")
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    HealthLine("定时调度（BusyBox crond）", state.cronRunning, state.cronStatus)
+                    if (state.rootRuntimeInstalled && !state.cronRunning) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { execute { bridge.restartScheduler() } }
+                        ) { Text("修复定时调度") }
+                        Text(
+                            "修复后若仍显示未运行，可查看 Root 私有目录中的 logs/scheduler.log。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     HealthLine("Binder IPC（实验）", state.ipcConnected, state.ipcStatus)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     HealthLine("微信 Hook（仅授权阶段需要）", state.hookConnected && state.hookConfigured,
