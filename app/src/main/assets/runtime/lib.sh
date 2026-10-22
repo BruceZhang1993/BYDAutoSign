@@ -240,18 +240,69 @@ _is_signed_today() {
     return 1
 }
 
-# === 停止 crond ===
-stop_crond() {
-    find_busybox
-    $BUSYBOX pkill -f "crond.*${WORK_DIR}/cron\.d" 2>/dev/null
+# === crond lifecycle and observable health ===
+# Match our exact -c directory rather than killing other Root modules' cron.
+own_crond_pids() {
+    local file cmd pid
+    for file in /proc/[0-9]*/cmdline; do
+        [ -r "$file" ] || continue
+        cmd=$(tr '\000' ' ' < "$file" 2>/dev/null) || continue
+        case "$cmd" in
+            *crond*" -c $WORK_DIR/cron.d "*|*crond*" -c$WORK_DIR/cron.d "*)
+                pid=${file#/proc/}
+                pid=${pid%/cmdline}
+                printf '%s\n' "$pid"
+                ;;
+        esac
+    done
 }
 
-# === 重启 crond ===
+cron_running() {
+    [ -n "$(own_crond_pids)" ]
+}
+
+stop_crond() {
+    local pid
+    for pid in $(own_crond_pids); do
+        kill "$pid" 2>/dev/null || true
+    done
+}
+
 restart_crond() {
+    local status=0
+    mkdir -p "$LOG_DIR" "$WORK_DIR/cron.d" || return 1
+    [ -s "$WORK_DIR/cron.d/root" ] || {
+        echo "CRON_ERROR: root crontab is missing" >&2
+        return 1
+    }
     stop_crond
     sleep 1
     find_busybox
-    $BUSYBOX crond -b -c "$WORK_DIR/cron.d" -L "$WORK_DIR/logs/cron_$(date '+%Y-%m-%d').log" 2>/dev/null
+    if [ "$BUSYBOX" = "busybox" ]; then
+        command -v busybox >/dev/null 2>&1 || {
+            echo "CRON_ERROR: BusyBox is not installed in Root environment" >&2
+            return 127
+        }
+    elif [ ! -x "$BUSYBOX" ]; then
+        echo "CRON_ERROR: BusyBox is not executable: $BUSYBOX" >&2
+        return 127
+    fi
+    "$BUSYBOX" --list | grep -qx crond || {
+        echo "CRON_ERROR: this BusyBox does not include crond" >&2
+        return 127
+    }
+    # Keep the same filename across midnight for diagnostics.
+    "$BUSYBOX" crond -b -c "$WORK_DIR/cron.d" -L "$LOG_DIR/cron.log" 2>>"$LOG_DIR/scheduler.log" || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "CRON_ERROR: crond launch failed (exit $status)" >&2
+        return "$status"
+    fi
+    sleep 1
+    if ! cron_running; then
+        echo "CRON_ERROR: crond exited shortly after startup" >&2
+        return 1
+    fi
+    return 0
 }
 
 # === 日志函数 ===
