@@ -17,6 +17,7 @@ data class ShellResult(val exitCode: Int, val output: String) {
 data class DeviceState(
     val rootRuntimeInstalled: Boolean = false,
     val cronRunning: Boolean = false,
+    val cronNeedsUpgrade: Boolean = false,
     val cronStatus: String = "",
     val hookConnected: Boolean = false,
     val ipcConnected: Boolean = false,
@@ -198,15 +199,21 @@ class RootBridge(private val context: Context) {
         val runtime = shell("test -x " + rootDir + "/byd_sign.sh && test -x " +
             rootDir + "/curl && test -x " + rootDir + "/openssl && echo READY", 10)
         val installed = runtime.ok && runtime.output.contains("READY")
+        // Older installed root-boot.sh ignored "status" and would restart
+        // crond on every page refresh. Never call it before checking support.
         val scheduler = if (installed) {
-            shell("/system/bin/sh /data/adb/service.d/byd_auto_sign.sh status", 10)
+            shell("if grep -q CRON_RUNNING /data/adb/service.d/byd_auto_sign.sh " +
+                "2>/dev/null; then /system/bin/sh /data/adb/service.d/byd_auto_sign.sh status; " +
+                "else echo CRON_LEGACY; fi", 10)
         } else ShellResult(1, "尚未部署")
+        val cronLegacy = scheduler.output.contains("CRON_LEGACY")
         val cronOk = scheduler.ok && scheduler.output.lineSequence().any { it.trim() == "CRON_RUNNING" }
         val cronSummary = when {
             !installed -> "先部署 Root 环境"
+            cronLegacy -> "调度脚本版本较旧，请先点击“重新部署 Root 环境”"
             !cronOk -> "定时服务未运行，请点击“修复定时调度”"
             !scheduler.output.contains("byd_sign.sh") -> "crond 运行中，但任务表没有签到命令"
-            else -> "crond 运行中 · 默认执行 00:01 / 07:01 / 13:01 / 22:01（如曾自定义则以任务表为准）"
+            else -> "crond 运行中 · 默认 00:01 / 07:01 / 13:01 / 22:01（以任务表为准）"
         }
         val config = if (installed) shell("cat " + rootDir + "/code_api.conf", 10) else ShellResult(-1, "")
         val parsed = PortConfig.fromFile(config.output)
@@ -220,6 +227,7 @@ class RootBridge(private val context: Context) {
         DeviceState(
             rootRuntimeInstalled = installed,
             cronRunning = cronOk && scheduler.output.contains("byd_sign.sh"),
+            cronNeedsUpgrade = cronLegacy,
             cronStatus = cronSummary,
             hookConnected = hook.connected,
             ipcConnected = com.brucezhang.bydautosign.ipc.IpcBrokerService.connected(),
