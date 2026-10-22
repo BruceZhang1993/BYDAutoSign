@@ -87,6 +87,8 @@ private fun Dashboard(bridge: RootBridge) {
                     HealthLine("Root 运行环境", state.rootRuntimeInstalled,
                         if (state.rootRuntimeInstalled) "已部署到 /data/adb/byd_sign" else "需要初始化")
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    HealthLine("Binder IPC（实验）", state.ipcConnected, state.ipcStatus)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     HealthLine("微信 Hook（仅授权阶段需要）", state.hookConnected && state.hookConfigured,
                         if (!state.hookConnected) "未连接：请检查 LSPosed 作用域并启动微信"
                         else if (!state.hookConfigured) "微信 " + state.hookVersion + "：版本映射未就绪"
