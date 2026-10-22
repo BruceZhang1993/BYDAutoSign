@@ -10,6 +10,9 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
 import android.util.Log;
+import org.json.JSONObject;
+import java.util.concurrent.atomic.AtomicBoolean;
+import com.brucezhang.bydautosign.ipc.ICodeResult;
 
 import com.brucezhang.bydautosign.ipc.IHookBroker;
 import com.brucezhang.bydautosign.ipc.IHookEndpoint;
@@ -20,22 +23,72 @@ public final class HookIpcClient {
     private static final String TAG = "BYDAutoSign-IPC";
     private static final String APP_PACKAGE = "com.brucezhang.bydautosign";
     private static final String SERVICE = APP_PACKAGE + ".ipc.IpcBrokerService";
+    // The BYD mini-program identifier currently used by byd_sign.sh.
+    private static final String AUTH_APP_ID = "wxf62054ec313d6f53";
+    public interface LoginAction { String run(String appId); }
+    private final LoginAction loginAction;
+    private final AtomicBoolean loginInFlight = new AtomicBoolean(false);
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean bound = false;
     private boolean retryScheduled = false;
     private volatile IHookBroker broker;
 
+    private void requireModuleCaller() {
+        int uid = Binder.getCallingUid();
+        String[] packages = context.getPackageManager().getPackagesForUid(uid);
+        if (packages != null) {
+            for (String name : packages) {
+                if (APP_PACKAGE.equals(name)) return;
+            }
+        }
+        throw new SecurityException("Only BYDAutoSign may invoke Hook IPC");
+    }
+
     private final IHookEndpoint.Stub endpoint = new IHookEndpoint.Stub() {
         @Override
         public String ping() {
-            int uid = Binder.getCallingUid();
-            String[] packages = context.getPackageManager().getPackagesForUid(uid);
-            if (packages == null) throw new SecurityException("Unknown IPC caller");
-            for (String name : packages) {
-                if (APP_PACKAGE.equals(name)) return "pong";
+            requireModuleCaller();
+            return "pong";
+        }
+
+        @Override
+        public void requestLoginCode(String requestId, String appId, ICodeResult callback) {
+            requireModuleCaller();
+            if (callback == null || requestId == null || requestId.length() > 80
+                    || !AUTH_APP_ID.equals(appId)) {
+                throw new IllegalArgumentException("Invalid authorization request");
             }
-            throw new SecurityException("Ping denied to non-module caller");
+            // There is no unsolicited login. Broker calls this only for an
+            // explicit user action. Never block an incoming Binder thread.
+            if (!loginInFlight.compareAndSet(false, true)) {
+                try { callback.onResult(requestId, -100, ""); }
+                catch (RemoteException ignored) { }
+                return;
+            }
+            new Thread(() -> {
+                int status = -500;
+                String code = "";
+                try {
+                    JSONObject result = new JSONObject(loginAction.run(appId));
+                    status = result.optInt("err", -500);
+                    if (status == 0) {
+                        code = result.optString("code", "");
+                        if (code.isEmpty() || code.length() > 4096) {
+                            status = -501;
+                            code = "";
+                        }
+                    }
+                    // Only the requested callback sees the one-time code.
+                    callback.onResult(requestId, status, code);
+                } catch (Exception error) {
+                    try { callback.onResult(requestId, -500, ""); }
+                    catch (RemoteException ignored) { }
+                } finally {
+                    code = "";
+                    loginInFlight.set(false);
+                }
+            }, "byd-ipc-authorize").start();
         }
     };
 
@@ -73,9 +126,10 @@ public final class HookIpcClient {
         }
     };
 
-    public HookIpcClient(Context context) {
+    public HookIpcClient(Context context, LoginAction loginAction) {
         // Application.attach may run before getApplicationContext() is ready.
         this.context = context;
+        this.loginAction = loginAction;
     }
 
     public void start() {
