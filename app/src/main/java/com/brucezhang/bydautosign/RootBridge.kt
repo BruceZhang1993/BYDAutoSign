@@ -3,6 +3,7 @@ package com.brucezhang.bydautosign
 import android.content.Context
 import android.os.Build
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -137,6 +138,16 @@ class RootBridge(private val context: Context) {
      * cron/signNow() are untouched. Never log or display the one-time code.
      */
     suspend fun authorizeViaBinder(): ShellResult = withContext(Dispatchers.IO) {
+        // Only an explicit user authorization may wake WeChat; cron never does.
+        if (!com.brucezhang.bydautosign.ipc.IpcBrokerService.connected()) {
+            shell("test -x " + rootDir + "/byd_sign.sh && /system/bin/sh " +
+                rootDir + "/byd_sign.sh wake-wechat", 25)
+            var attempts = 0
+            while (attempts++ < 15 &&
+                !com.brucezhang.bydautosign.ipc.IpcBrokerService.connected()) {
+                delay(1000)
+            }
+        }
         val result = com.brucezhang.bydautosign.ipc.IpcBrokerService.obtainCode(bydAppId)
         if (!result.successful()) {
             return@withContext ShellResult(1, "Binder 获取微信登录凭证失败（状态 " + result.status +
