@@ -2,7 +2,8 @@ package com.brucezhang.bydautosign.ipc;
 
 import android.app.Service;
 import android.content.Intent;
-import android.content.pm.PackageManager;
+import android.app.AppOpsManager;
+import android.content.Context;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
@@ -67,26 +68,15 @@ public final class IpcBrokerService extends Service {
     };
 
     private void assertWeChatCaller(int uid) {
-        boolean ownsPackage = false;
-        String[] packages = getPackageManager().getPackagesForUid(uid);
-        if (packages != null) {
-            for (String name : packages) {
-                if (WECHAT_PACKAGE.equals(name)) {
-                    ownsPackage = true;
-                    break;
-                }
-            }
+        // AppOps validates UID->package ownership in system_server even when
+        // Android package-visibility filters would hide getPackagesForUid().
+        if (!UserHandle.getUserHandleForUid(uid)
+                .equals(UserHandle.getUserHandleForUid(android.os.Process.myUid()))) {
+            throw new SecurityException("Cross-user Binder registration not yet supported");
         }
-        // This is a same-Android-user POC. A cloned user requires a distinct
-        // cross-user design; do not silently treat its UID as the owner UID.
-        try {
-            int installedUid = getPackageManager().getApplicationInfo(WECHAT_PACKAGE, 0).uid;
-            if (!ownsPackage || installedUid != uid) {
-                throw new SecurityException("Caller is not the installed WeChat UID");
-            }
-        } catch (PackageManager.NameNotFoundException error) {
-            throw new SecurityException("WeChat package is not visible to Broker", error);
-        }
+        AppOpsManager ops = (AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
+        if (ops == null) throw new SecurityException("AppOps unavailable");
+        ops.checkPackage(uid, WECHAT_PACKAGE);
     }
 
     private void forgetLocked() {
