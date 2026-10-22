@@ -121,11 +121,43 @@ private fun Dashboard(bridge: RootBridge) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(enabled = !busy, onClick = { execute { bridge.initialize() } }) {
-                            Text(if (state.rootRuntimeInstalled) "重新部署并授权" else "初始化并授权")
+                        Button(
+                            enabled = !busy,
+                            onClick = {
+                                execute {
+                                    if (state.rootRuntimeInstalled) bridge.deployRuntimeOnly()
+                                    else if (state.ipcConnected) bridge.initializeViaBinder()
+                                    else bridge.initialize()
+                                }
+                            }
+                        ) {
+                            Text(
+                                if (state.rootRuntimeInstalled) "重新部署 Root 环境"
+                                else if (state.ipcConnected) "初始化并通过 Binder 授权"
+                                else "初始化并授权（旧通道）"
+                            )
                         }
-                        OutlinedButton(enabled = !busy, onClick = { scope.launch { busy = true; try { reload() } finally { busy = false } } }) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { scope.launch { busy = true; try { reload() } finally { busy = false } } }
+                        ) {
                             Text("刷新")
+                        }
+                    }
+                    if (!state.rootRuntimeInstalled) {
+                        TextButton(enabled = !busy, onClick = { execute { bridge.deployRuntimeOnly() } }) {
+                            Text("仅部署 Root 环境（不授权微信）")
+                        }
+                        if (state.ipcConnected) {
+                            Text(
+                                "已验证 Binder Ping/Pong；初始化会先部署 Root 环境，再尝试" +
+                                    "通过 Binder 获取一次性 code，不自动退回 HTTP 通道。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            TextButton(enabled = !busy, onClick = { execute { bridge.initialize() } }) {
+                                Text("使用旧 HTTP 通道初始化（备用）")
+                            }
                         }
                     }
                 }
