@@ -522,7 +522,7 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                 // Keep the existing working HTTP path until a real device confirms
                 // the new IPC link; registration itself never requests a login code.
                 if (ipcClient == null) {
-                    ipcClient = new HookIpcClient(context);
+                    ipcClient = new HookIpcClient(context, appId -> doLogin(appId, classLoader));
                     ipcClient.start();
                 }
                 if (isPortInUse(httpPort)) {
