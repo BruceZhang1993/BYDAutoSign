@@ -28,7 +28,7 @@ keytool -genkeypair -v \
   -keyalg RSA -keysize 3072 -validity 36500
 ```
 
-在 Linux 上获取 Base64：`base64 -w 0 bydautosign-release.jks`；macOS 可使用 `base64 < bydautosign-release.jks | tr -d '\\n'`。
+在 Linux 上获取 Base64：`base64 -w 0 bydautosign-release.jks`；macOS 可使用 `base64 < bydautosign-release.jks | tr -d '\n'`。
 
 **切勿将 `.jks`、私钥、密码或 Base64 内容提交到 Git 仓库、Issue、PR 或日志。** 密钥应离线加密备份；所有正式构建必须复用同一密钥。GitHub Actions 并不自动提供 Android Release 签名证书。若未配置 Secret，签名步骤会明确失败，且不上传未签名产物。
 
