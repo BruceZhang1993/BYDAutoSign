@@ -86,13 +86,17 @@ class RootBridge(private val context: Context) {
         return ShellResult(process.exitValue(), out.toString().trim())
     }
 
-    suspend fun initialize(): ShellResult = withContext(Dispatchers.IO) {
+    /**
+     * Deploy the Root runtime and cron scheduler without requesting WeChat
+     * login. This permits a clean Binder IPC authorization on first install.
+     */
+    suspend fun deployRuntimeOnly(): ShellResult = withContext(Dispatchers.IO) {
         try {
             val abi = Build.SUPPORTED_ABIS.firstOrNull { it == "arm64-v8a" || it == "armeabi-v7a" }
                 ?: return@withContext ShellResult(2, "不支持的 CPU 架构（仅 arm64-v8a、armeabi-v7a）")
             val stage = File(context.filesDir, "sign-runtime")
             if (stage.exists()) stage.deleteRecursively()
-            stage.mkdirs()
+            if (!stage.mkdirs()) return@withContext ShellResult(2, "无法创建 Root 部署暂存目录")
             val names = listOf("byd_sign.sh", "lib.sh", "email.conf", "webui_api.sh", "root-boot.sh", "root-install.sh")
             for (name in names) {
                 context.assets.open("runtime/" + name).use { source ->
@@ -104,17 +108,39 @@ class RootBridge(private val context: Context) {
                     File(stage, name).outputStream().use { target -> source.copyTo(target) }
                 }
             }
-            val result = shell("sh " + quote(File(stage, "root-install.sh").absolutePath) +
-                " " + quote(stage.absolutePath), 60)
-            if (!result.ok) return@withContext result
-            val auth = shell("sh " + rootDir + "/byd_sign.sh authorize", 210)
-            ShellResult(auth.exitCode,
-                "Root 运行环境已部署。\n" +
-                (if (auth.ok) "会话初始化成功。\n" else "会话初始化未全部成功，请检查微信登录或重新授权。\n") +
-                auth.output)
+            val result = shell(
+                "sh " + quote(File(stage, "root-install.sh").absolutePath) +
+                    " " + quote(stage.absolutePath), 60
+            )
+            if (result.ok) ShellResult(0, "Root 运行环境已部署，签到调度已配置。下一步请通过 Binder 授权。")
+            else result
         } catch (e: Exception) {
-            ShellResult(-1, "初始化失败：" + (e.message ?: e.javaClass.simpleName))
+            ShellResult(-1, "部署 Root 运行环境失败：" + e.javaClass.simpleName)
         }
+    }
+
+    /** Legacy HTTP authorization remains available as an explicit fallback. */
+    suspend fun initialize(): ShellResult {
+        val deployment = deployRuntimeOnly()
+        if (!deployment.ok) return deployment
+        val auth = authorize()
+        return ShellResult(
+            auth.exitCode,
+            deployment.output + "\\n" +
+                if (auth.ok) "旧通道会话初始化成功。" else
+                    "Root 环境已部署，但旧通道授权失败。可以单独尝试 Binder 授权。"
+        )
+    }
+
+    /** Preferred experimental first-run workflow; never falls back to HTTP silently. */
+    suspend fun initializeViaBinder(): ShellResult {
+        val deployment = deployRuntimeOnly()
+        if (!deployment.ok) return deployment
+        val auth = authorizeViaBinder()
+        return ShellResult(
+            auth.exitCode,
+            deployment.output + "\\n" + auth.output
+        )
     }
 
     suspend fun authorize(): ShellResult = withContext(Dispatchers.IO) {
