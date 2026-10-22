@@ -25,7 +25,7 @@ for version, (j1, model, static) in known.items():
     assert entry.get("j1_instance_method", versions["common"]["j1_instance_method"]) == "g", version
 
 # Explicit fail-fast instead of applying the 8.0.62 default on unknown releases.
-assert "HOOK_VERSION_UNSUPPORTED" in source
+assert "HOOK_MAPPING_NOT_READY" in source
 assert "HOOK_CLASS_NOT_FOUND" in source
 assert 'private String j1 = "";' in source
 assert 'configSupported = true' in source and 'configSupported = false' in source
