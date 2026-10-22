@@ -132,6 +132,37 @@ public final class IpcBrokerService extends Service {
         }
     }
 
+    /** Status is obtained over Binder, not over a localhost HTTP endpoint. */
+    public static String readHookStatus() {
+        IpcBrokerService service = running;
+        if (service == null) return null;
+        final IHookEndpoint hook;
+        synchronized (service.lock) { hook = service.endpoint; }
+        if (hook == null) return null;
+        try {
+            // Only allow a small status payload; the result must contain no secrets.
+            String status = hook.getHookStatus();
+            return status != null && status.length() <= 8192 ? status : null;
+        } catch (RemoteException | SecurityException error) {
+            return null;
+        }
+    }
+
+    /** Non-blocking forced DEX probe, invoked only through the module UI. */
+    public static boolean requestProbe() {
+        IpcBrokerService service = running;
+        if (service == null) return false;
+        final IHookEndpoint hook;
+        synchronized (service.lock) { hook = service.endpoint; }
+        if (hook == null) return false;
+        try {
+            hook.triggerProbe();
+            return true;
+        } catch (RemoteException | SecurityException error) {
+            return false;
+        }
+    }
+
     public static final class CodeResult {
         public final int status;
         public final String code;
