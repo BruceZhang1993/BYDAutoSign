@@ -127,8 +127,8 @@ public final class IpcBrokerService extends Service {
         try {
             String reply = callback.ping();
             if (!"pong".equals(reply)) return "已注册，但 Ping 响应异常";
-            int userId = UserHandle.getUserHandleForUid(uid).getIdentifier();
-            return "已注册 · User " + userId + " · Ping/Pong 正常";
+            UserHandle user = UserHandle.getUserHandleForUid(uid);
+            return "已注册 · " + user + " · Ping/Pong 正常";
         } catch (RemoteException e) {
             synchronized (service.lock) {
                 if (service.endpoint == callback) service.forgetLocked();
