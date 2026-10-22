@@ -27,7 +27,9 @@ public final class HookIpcClient {
     // The BYD mini-program identifier currently used by byd_sign.sh.
     private static final String AUTH_APP_ID = "wxf62054ec313d6f53";
     public interface LoginAction { String run(String appId); }
+    public interface StatusAction { String getStatus(); void reprobe(); }
     private final LoginAction loginAction;
+    private final StatusAction statusAction;
     private final AtomicBoolean loginInFlight = new AtomicBoolean(false);
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -46,6 +48,18 @@ public final class HookIpcClient {
         public String ping() {
             requireModuleCaller();
             return "pong";
+        }
+
+        @Override
+        public String getHookStatus() {
+            requireModuleCaller();
+            return statusAction.getStatus();
+        }
+
+        @Override
+        public void triggerProbe() {
+            requireModuleCaller();
+            statusAction.reprobe();
         }
 
         @Override
@@ -122,10 +136,11 @@ public final class HookIpcClient {
         }
     };
 
-    public HookIpcClient(Context context, LoginAction loginAction) {
+    public HookIpcClient(Context context, LoginAction loginAction, StatusAction statusAction) {
         // Application.attach may run before getApplicationContext() is ready.
         this.context = context;
         this.loginAction = loginAction;
+        this.statusAction = statusAction;
     }
 
     public void start() {
