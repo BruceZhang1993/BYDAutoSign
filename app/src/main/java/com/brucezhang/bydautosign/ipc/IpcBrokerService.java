@@ -7,6 +7,11 @@ import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.UserHandle;
+import android.os.Looper;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * POC A: WeChat's injected LSPosed hook binds this module-owned service and
@@ -129,11 +134,67 @@ public final class IpcBrokerService extends Service {
             if (!"pong".equals(reply)) return "已注册，但 Ping 响应异常";
             UserHandle user = UserHandle.getUserHandleForUid(uid);
             return "已注册 · " + user + " · Ping/Pong 正常";
-        } catch (RemoteException e) {
+        } catch (RemoteException | SecurityException e) {
             synchronized (service.lock) {
                 if (service.endpoint == callback) service.forgetLocked();
             }
             return "Binder 已断开，等待微信重新注册";
+        }
+    }
+
+    public static final class CodeResult {
+        public final int status;
+        public final String code;
+        public CodeResult(int status, String code) {
+            this.status = status;
+            this.code = code;
+        }
+        public boolean successful() { return status == 0 && code != null && !code.isEmpty(); }
+    }
+
+    /**
+     * Local-only API, invoked from BYDAutoSign's explicit authorization UI
+     * on a worker thread. No public Binder method allows arbitrary clients
+     * to trigger a login.
+     */
+    public static CodeResult obtainCode(String appId) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return new CodeResult(-600, "");
+        }
+        IpcBrokerService service = running;
+        if (service == null) return new CodeResult(-601, "");
+        final IHookEndpoint hook;
+        final int trustedUid;
+        synchronized (service.lock) {
+            hook = service.endpoint;
+            trustedUid = service.registeredUid;
+        }
+        if (hook == null) return new CodeResult(-601, "");
+
+        final String requestId = UUID.randomUUID().toString();
+        final CountDownLatch done = new CountDownLatch(1);
+        final AtomicReference<CodeResult> result = new AtomicReference<>(new CodeResult(-602, ""));
+        ICodeResult.Stub response = new ICodeResult.Stub() {
+            @Override
+            public void onResult(String receivedId, int status, String code) {
+                if (Binder.getCallingUid() != trustedUid || !requestId.equals(receivedId)) {
+                    return;
+                }
+                // Never log one-time codes or returned secrets.
+                result.set(new CodeResult(status,
+                        status == 0 && code != null && code.length() <= 4096 ? code : ""));
+                done.countDown();
+            }
+        };
+        try {
+            hook.requestLoginCode(requestId, appId, response);
+            if (!done.await(75, TimeUnit.SECONDS)) return new CodeResult(-603, "");
+            return result.get();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new CodeResult(-604, "");
+        } catch (RemoteException | SecurityException remoteError) {
+            return new CodeResult(-605, "");
         }
     }
 
