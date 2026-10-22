@@ -390,7 +390,8 @@ session_path() {
 }
 
 save_session() {
-    local port="$1" value="$2" target temporary
+    local port="$1" value="$2" origin="${3:-unknown}" target temporary
+    case "$origin" in binder|http|unknown) ;; *) origin="unknown" ;; esac
     target=$(session_path "$port") || return 1
     [ -n "$value" ] && [ "${#value}" -le 2048 ] || return 1
     if printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'; then return 1; fi
@@ -403,6 +404,13 @@ save_session() {
     mv -f "$temporary" "$target" || return 1
     date '+%Y-%m-%d %H:%M:%S' > "${target}.at"
     chmod 600 "${target}.at"
+    # Only provenance is stored; never write code or session text to metadata.
+    if (umask 077; printf '%s' "$origin" > "${target}.via"); then
+        chmod 600 "${target}.via" || true
+    else
+        rm -f "${target}.via"
+    fi
+    return 0
 }
 
 load_session() {
@@ -415,17 +423,23 @@ load_session() {
 forget_session() {
     local target
     target=$(session_path "$1") || return 1
-    rm -f "$target" "${target}.at"
+    rm -f "$target" "${target}.at" "${target}.via"
 }
 
 session_status() {
-    local port target at
+    local port target at origin source
     for port in $(get_code_api_ports); do
         valid_port "$port" || continue
         target=$(session_path "$port") || continue
         if [ -s "$target" ] && [ ! -L "$target" ]; then
             at=$(cat "${target}.at" 2>/dev/null)
-            printf '端口 %s：已初始化会话（%s；有效期由服务端决定）\n' "$port" "${at:-时间未知}"
+            origin=$(cat "${target}.via" 2>/dev/null)
+            case "$origin" in
+                binder) source="Binder IPC" ;;
+                http) source="旧 HTTP" ;;
+                *) source="来源未知" ;;
+            esac
+            printf '端口 %s：已初始化会话（%s；%s；有效期由服务端决定）\n' "$port" "${at:-时间未知}" "$source"
         else
             printf '端口 %s：未授权或会话已失效，需要重新授权\n' "$port"
         fi
@@ -470,7 +484,7 @@ authorize() {
         fi
         session="$RETRY_OUTPUT"
         code="" # Never persist code.
-        if save_session "$port" "$session"; then
+        if save_session "$port" "$session" http; then
             log "[端口 ${port}] 初始化完成：会话已保存（仅 Root 可读）"
             ok=$((ok + 1))
         else
@@ -501,7 +515,7 @@ authorize_from_stdin() {
     fi
     session="$RETRY_OUTPUT"
     code=""
-    if save_session "$port" "$session"; then
+    if save_session "$port" "$session" binder; then
         session=""
         log "[端口 ${port}] Binder 授权成功：会话已保存"
         return 0
