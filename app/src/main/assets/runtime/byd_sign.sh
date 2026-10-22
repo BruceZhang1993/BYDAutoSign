@@ -397,7 +397,7 @@ save_session() {
     umask 077
     mkdir -p "$SESSION_DIR" || return 1
     chmod 700 "$SESSION_DIR" || return 1
-    temporary="${target}.$"
+    temporary=$(mktemp "${target}.XXXXXX") || return 1
     (umask 077; printf '%s' "$value" > "$temporary") || return 1
     chmod 600 "$temporary" || return 1
     mv -f "$temporary" "$target" || return 1
