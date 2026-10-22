@@ -37,10 +37,16 @@ if [ ! -f "$D/email.conf" ]; then
   fi
 fi
 chmod 600 "$D/code_api.conf" "$D/email.conf"
-if [ ! -f "$D/cron.d/root" ]; then
+if [ ! -s "$D/cron.d/root" ]; then
+  if [ -f "$D/cron.d/root" ]; then
+    cp "$D/cron.d/root" "$D/cron.d/root.empty.bak"
+  fi
   printf '1 0,7,13,22 * * * %s/byd_sign.sh > /dev/null 2>&1\n' "$D" > "$D/cron.d/root"
 fi
 chmod 600 "$D/cron.d/root"
+if ! grep -Fq "$D/byd_sign.sh" "$D/cron.d/root"; then
+  echo "WARNING: existing root crontab does not schedule BYDAutoSign; user-defined schedule preserved."
+fi
 cp "$SRC/root-boot.sh" "$BOOT"
 chmod 755 "$BOOT"
 command -v restorecon >/dev/null 2>&1 && restorecon "$BOOT" "$D" 2>/dev/null || true
