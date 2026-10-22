@@ -88,7 +88,7 @@ private fun Dashboard(bridge: RootBridge) {
                         if (state.rootRuntimeInstalled) "已部署到 /data/adb/byd_sign" else "需要初始化")
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     HealthLine("定时调度（BusyBox crond）", state.cronRunning, state.cronStatus)
-                    if (state.rootRuntimeInstalled && !state.cronRunning) {
+                    if (state.rootRuntimeInstalled && !state.cronRunning && !state.cronNeedsUpgrade) {
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(
                             enabled = !busy,
