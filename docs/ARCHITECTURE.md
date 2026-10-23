@@ -1,62 +1,43 @@
-# BYD Auto Sign 架构（Binder-only 主用户授权）
-
-## 部署与进程
+# BYD Auto Sign 原生架构（v0.5.0）
 
 ```text
-BYD Auto Sign APK
-  ├── MainActivity / RootBridge.kt：状态、初始化、授权、立即签到
-  ├── IpcBrokerService：供微信 Hook 主动绑定、注册 Binder Endpoint
-  │    ├── ping() / getHookStatus() / triggerProbe()
-  │    └── requestLoginCode(requestId, appId, callback)（仅显式授权）
-  └── 打包的 root-install.sh、byd_sign.sh、lib.sh、curl/openssl
+用户点击初始化/重新授权
+  → IpcBrokerService (UID/AppOps 校验)
+  → LSPosed 微信 Hook (仅主 User 0)
+  → 一次性 code
+  → NativeSignEngine.exchangeSession (JCA + OkHttp TLS)
+  → SignStore (AndroidKeyStore AES-GCM 密文)
 
-微信主进程（LSPosed，com.tencent.mm）
-  └── WxLoginHook → HookIpcClient
-      ├── Binder 注册、死亡清理与断线重新绑定
-      ├── 动态 DEX 结构分析、指纹缓存及状态
-      └── 用户触发 JsApiLogin 返回一次性 code
-
-Root /data/adb/byd_sign
-  ├── sessions/8088.session     # 仅 Root 可读、原子覆盖
-  ├── sessions/8088.session.via # binder / http / unknown 非敏感历史来源
-  ├── cron.d/root               # 默认 00:01,07:01,13:01,22:01
-  ├── logs/
-  └── /data/adb/service.d/byd_auto_sign.sh -> root-boot.sh
+每天用户定义的多个 HH:mm 时间
+  → AlarmManager RTC_WAKEUP (精确/非精确)
+  → SignAlarmReceiver (只排下一次闹钟并派发)
+  → WorkManager (网络约束、指数重试)
+  → SignCoordinator (今日幂等、互斥)
+  → NativeSignEngine.sign (读已缓存 BYD session，不唤醒微信)
+  → SignStore (记录成功日期、结果、连续天数)
 ```
 
-**当前仓库内不再包含 localhost HTTP 服务或 /login 接口。** Git/Root 的历史端口 `8088` 等仅代表已有 session 的存储槽位，不再是侦听端口。
+## Root 已彻底退出运行链
 
-## 认证流程
+Android 应用不再调用 `su` / ProcessBuilder，不再复制到 `/data/adb`，不启动 `service.d`、BusyBox crond，不捆绑或运行 curl/OpenSSL。旧 Root 目录由用户通过旧 Root 管理工具手动停用或移除；普通 APK 无法合法代为访问或删除。
 
-1. 打开 App，部署 Root 运行时（不会删除已有的用户设置和 session）。
-2. 当用户明确点击初始化/重新授权时，`RootBridge` 查询 Binder。若微信未连接，可在此授权阶段通过 Root 唤醒微信后再等待 Binder 注册；签到阶段不做此操作。
-3. Broker 通过 AIDL 回调微信 Hook，在专用工作线程执行动态映射的 `JsApiLogin`，异步返回一次性 code。调用者在每个 Binder 事务中通过 `AppOps.checkPackage(uid, package)` 校验真实调用 UID 对应的包，主用户跨 User 会被拒绝。
-4. App 通过 Root 进程标准输入将 code 交给 `byd_sign.sh authorize-stdin 8088`；不通过 argv/URL/文件传递 code。
-5. Shell 沿用现有 BYD AES/签名/网络协议将 code 兑换成 `session_id`，并使用私有文件（0600）持久化。旧的 session 在授权失败时不删除。
-6. 定时/手动签到只读取已有 session，执行 `activity/sign/signIn`；不获取新 code，不要求微信运行。服务器明确判定 session 失效才按既有逻辑清除。
+注意：LSPosed Hook 仍然是首次微信登录授权的外部前提。所谓“无 Root”指本应用运行链不调用 Root/Root 脚本，并不表示所有 LSPosed 安装方案都不需要系统级权限。
 
-一次性 code 不应写入日志或诊断信息；存储的 `.session.via` 仅为来源标识，兼容历史无标识文件。
+## 协议与安全
 
-## DEX 探测
+BYD 旧客户端协议：`AES-128-CBC/PKCS5Padding` + Base64，`SHA-256(APPSECRET+nonce+curtime)`，两个 POST 服务 `mina.decryptCode` 与 `activity/sign/signIn`。固定密钥和签名常量属于客户端协议，**不是个人 session 密钥**；会话存储另使用随机 IV 的 AndroidKeyStore AES-GCM。正常网络请求启用操作系统默认 CA 和主机名验证，不再接受上游 `curl --insecure` 的不安全做法。
 
-微信进程在 `Application.attach` 后异步验证已知映射及 DEX 指纹；如不匹配，通过 `DexProbe` 和 `HookMap` 自动发现、验证并缓存。管理端从 `IHookEndpoint.getHookStatus` 获取版本、映射来源、`probeRunning`、`codeVerified` 等状态；使用 `triggerProbe` 手动触发。无 HTTP 状态接口。
+服务端是否强制特殊 header、是否跨天有效和 session 失效信号尚未在新版设备上验证。正常业务失败不清空凭证，只有匹配明确过期反馈才清除。绝不记录敏感 code/session/原始响应。
 
-## Root 调度
+## 调度语义
 
-`root-install.sh` 部署后由 `root-boot.sh` 启动 BusyBox `crond`。启动脚本检查 crond applet/真实进程存活并将错误写入 `logs/scheduler.log`；任务日志为 `logs/cron.log`。设备重启时依赖 Root 管理器支持 `/data/adb/service.d`。普通 cron **不保证 Android Doze 或关机后补执行**；具体诊断见 [CRON_TROUBLESHOOTING.md](CRON_TROUBLESHOOTING.md)。
+自定义时间按手机本地时区计算，每次仅注册下一次闹钟。Android 12+ 没有精确闹钟特权时回退 `setAndAllowWhileIdle`。闹钟广播只提交一次唯一 WorkManager 任务，签到在网络可用时运行，重试最多四次；开机/升级/时区/时间及权限变化重新注册，并在当天至少一个配置时刻已到且未签到时补偿。
 
-## 兼容与安全边界
+WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可能限制 AlarmManager，实机状态与连续运行验证不可省略。任务不请求 Binder、不唤醒微信、不刷新 session。
 
-- **单 APK + Root + LSPosed**，没有额外的 HTTP server、端口监听或 NanoHTTPD 依赖。
-- 保留已有 `/data/adb/byd_sign` 目录、会话、签到日期、通知配置和旧的 `code_api.conf` 槽位。升级后需在管理页重新部署 Root 环境，重启微信重新注入 Hook。
-- 主微信 (Android User 0) 已有用户截图确认 Binder Ping/Pong 成功；**实际取码、Session 兑换、跨夜自动执行尚待设备验证**。自动化静态/模拟测试不等价于真机测试。
-- 当前 Binder 不会跨 Android User 注册。系统微信分身的全新授权需要另设计跨用户安全 Broker；已有分身 session 在过期前仍可由签到脚本读取。
-- AppOps 的包 UID 身份校验不是微信官方签名证书 Pinning。对微信进程和 Root 拥有控制权限者不在本方案安全边界之外；进一步签名策略、SELinux 和分身支持留待后续验收。
-- 所有 BYD HTTPS/通知网络请求仍由 Shell curl 发起，不涉及 localhost IPC。还需单独消除旧 Shell 的 `--insecure` 等问题。
+## 已知限制
 
-## 验收顺序
-
-1. 编译/静态检测：AIDL 接口、Hook mapping、Root stdin 模拟授权、无本地 HTTP 依赖、签到不唤醒微信。
-2. 真机：安装新 APK，重启微信并重新部署 Root runtime，检查 Binder 已注册；主动重新授权，核实 `session.via=binder`，随后立即签到成功。
-3. 可靠性：重启微信/App、结束进程、锁屏 cron、会话失效、分身用户。全部单列测试，不用 Stage 1 的历史 HTTP 记录冒充 Binder 端到端成功。
-
+- 主微信 Binder 取码真机全链路、线上协议、锁屏、重启及网络恢复需验证。
+- 跨 Android User 微信分身暂不支持新授权；不隐式读取旧 Root 会话。
+- 尚未实现主动自动重授权、通知配置、多账号/多品牌 Provider。
+- 安卓进程被系统限制、精确闹钟特权被撤销时执行可能延迟。

@@ -17,21 +17,12 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
-      - name: Download and verify upstream Android tools
-        run: bash scripts/prepare-runtime.sh
-      - name: Validate runtime scripts
+      - name: Validate pure Kotlin protocol and scheduler implementation
         run: |
-          bash -n scripts/prepare-runtime.sh
-          sh -n app/src/main/assets/runtime/root-install.sh
-          sh -n app/src/main/assets/runtime/byd_sign.sh
-          sh -n app/src/main/assets/runtime/lib.sh
-          sh -n app/src/main/assets/runtime/webui_api.sh
-      - name: Validate wxcode version mappings
-        run: python3 scripts/check-hook-config.py
-      - name: Verify authorization/sign-only separation
-        run: python3 scripts/check-sign-session.py
-      - name: Verify cron daemon identification and scheduling recovery
-        run: python3 scripts/check-cron-scheduler.py
+          test ! -e app/src/main/java/com/brucezhang/bydautosign/RootBridge.kt
+          test ! -d app/src/main/assets/runtime
+          test ! -e scripts/prepare-runtime.sh
+          ! grep -R 'ProcessBuilder("su"' app/src/main/java
       - name: Run unit tests and verify APK packaging
         run: bash ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
       - name: Inspect single APK payload (not an upload artifact)
@@ -40,9 +31,8 @@ jobs:
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           test -s "$APK"
-          for item in assets/xposed_init assets/runtime/byd_sign.sh assets/runtime/lib.sh assets/runtime/root-install.sh assets/runtime/root-boot.sh; do
-            unzip -Z1 "$APK" | grep -Fx "$item" >/dev/null || { echo "::error::Missing APK asset: $item"; exit 1; }
-          done
+          unzip -Z1 "$APK" | grep -Fx "assets/xposed_init" >/dev/null
+          if unzip -Z1 "$APK" | grep -Eq '^(assets/runtime/|assets/bin/)'; then echo "::error::Root runtime bundled"; exit 1; fi
           # The HTTP implementation and dependency must no longer be in source.
           test ! -e app/src/main/java/xiaojw/hook/LoginHttpServer.java
           ! grep -Rq 'org.nanohttpd:nanohttpd' app/build.gradle
@@ -88,9 +78,8 @@ jobs:
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner | sort -V | tail -n 1)
           test -n "$APKSIGNER" && test -x "$APKSIGNER"
           "$APKSIGNER" verify --verbose --print-certs "$APK"
-          for item in assets/xposed_init assets/runtime/byd_sign.sh assets/runtime/lib.sh assets/runtime/root-install.sh assets/runtime/root-boot.sh assets/runtime/bin/arm64-v8a/curl assets/runtime/bin/arm64-v8a/openssl assets/runtime/bin/armeabi-v7a/curl assets/runtime/bin/armeabi-v7a/openssl; do
-            unzip -Z1 "$APK" | grep -Fx "$item" > /dev/null || { echo "::error::Missing APK asset: $item"; exit 1; }
-          done
+          unzip -Z1 "$APK" | grep -Fx "assets/xposed_init" >/dev/null
+          if unzip -Z1 "$APK" | grep -Eq '^(assets/runtime/|assets/bin/)'; then echo "::error::Root runtime bundled"; exit 1; fi
           sha256sum "$APK"
 
       # GitHub added direct non-zipped artifacts in upload-artifact v7
