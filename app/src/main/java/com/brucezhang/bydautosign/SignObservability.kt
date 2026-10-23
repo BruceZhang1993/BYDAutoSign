@@ -87,6 +87,7 @@ internal data class ScheduleSnapshot(
     val lastStartAt: Long = 0,
     val lastFinishAt: Long = 0,
     val lastWatchdogAt: Long = 0,
+    val lastCompensateAt: Long = 0,
     val lastState: String = "尚未运行"
 )
 
@@ -109,6 +110,7 @@ internal class ScheduleTelemetry(context: Context) {
             .putString("state", state.take(80)).apply()
     }
     fun watchdog() { prefs.edit().putLong("watchdog", System.currentTimeMillis()).apply() }
+    fun compensation() { prefs.edit().putLong("compensate", System.currentTimeMillis()).apply() }
     fun snapshot() = ScheduleSnapshot(
         nextAt = prefs.getLong("next", 0),
         exact = prefs.getBoolean("exact", false),
@@ -118,6 +120,7 @@ internal class ScheduleTelemetry(context: Context) {
         lastStartAt = prefs.getLong("started", 0),
         lastFinishAt = prefs.getLong("finished", 0),
         lastWatchdogAt = prefs.getLong("watchdog", 0),
+        lastCompensateAt = prefs.getLong("compensate", 0),
         lastState = prefs.getString("state", "尚未运行") ?: "尚未运行"
     )
 }
