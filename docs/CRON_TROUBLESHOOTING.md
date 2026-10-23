@@ -55,3 +55,26 @@ su -c 'tail -n 30 /data/adb/byd_sign/logs/scheduler.log'
 ```
 
 如果命令一能看到本应用的 crond，但 App 显示未运行，优先排查健康检查误判；否则先看启动错误。只有 `CRON_RUNNING` 并且任务表包含 `byd_sign.sh` 时，应用才会显示绿色。进程正在运行不意味着屏幕熄灭期间能准确被唤醒。
+
+## 2026-10-23：`CRON_STARTED` 后仍报错 124
+
+若修复按钮显示：
+
+```text
+操作失败 (124)
+操作超时
+CRON_STARTED
+```
+
+说明启动脚本**已经走到确认 crond 存活的分支**，但管理端的 `su -c` 命令仍未在超时时间内正常退出。BusyBox `crond -b` 会在后台运行，如果未明确关闭/重定向标准输入、标准输出与标准错误描述符，部分 Root 管理器中会让后台 daemon 保持与当前 Root 命令关联的文件描述符，表现为「启动已成功，但调用者等待超时」。这与「找不到 BusyBox」不同。
+
+修复措施：
+
+- `restart_crond()` 在创建 daemon 时明确使用 `</dev/null >/dev/null 2>>scheduler.log`；保留错误日志，不让后台 daemon 使用父命令的输入输出管道。
+- `RootBridge.shell()` 对不传入敏感 stdin 的命令立即关闭 `process.outputStream`，主动通知 Root 进程标准输入 EOF。
+- `restartScheduler()` 启动结束后单独执行只读 `status`：只有返回 `CRON_RUNNING`，且任务表包含 `byd_sign.sh` 时才报告成功。若启动命令超时但实际已运行，会显示经过核验的成功信息；若状态仍不正常，则保留错误状态和诊断。
+- CI 新增防止后台 fd 继承和只依赖 `CRON_STARTED` 的回归断言。
+
+安装包含上述修复的新版 APK 后，请**先点击「重新部署 Root 环境」**，更新磁盘上的 `lib.sh` 和 service.d 启动脚本；之后点击「修复定时调度」，刷新确认。此前已保存的 BYD 会话和历史 cron 配置不应删除。
+
+**注意：** `CRON_STARTED` 是之前的启动结果，不意味着指定时间签到肯定执行；仍须验证当天 `cron.log` 和签到日志，并考虑 Android 深度休眠下传统 crond 无法精准唤醒的限制。
