@@ -189,7 +189,9 @@ _is_signed_today() {
 # BusyBox crond's argv format differs by Root manager and Android version.
 # /proc/pid/cwd is a fallback because crond changes directory to its spool.
 is_own_crond() {
-    local command_line="$1" cwd="$2"
+    local command_line="$1" cwd="$2" comm="$3"
+    # Never confuse a shell executing a crond command with the daemon itself.
+    case "$comm" in crond|busybox) ;; *) return 1 ;; esac
     case "$command_line" in
         *crond*" -c $WORK_DIR/cron.d "*|*crond*" -c$WORK_DIR/cron.d "*)
             return 0
@@ -204,7 +206,7 @@ is_own_crond() {
 }
 
 own_crond_pids() {
-    local file pid command_line cwd state
+    local file pid command_line cwd state comm
     for file in /proc/[0-9]*/cmdline; do
         [ -r "$file" ] || continue
         pid=${file#/proc/}
@@ -213,7 +215,8 @@ own_crond_pids() {
         [ "$state" = Z ] && continue
         command_line=$(tr '\000' ' ' < "$file" 2>/dev/null) || continue
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || cwd=""
-        if is_own_crond "$command_line" "$cwd"; then
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null) || comm=""
+        if is_own_crond "$command_line" "$cwd" "$comm"; then
             printf '%s\n' "$pid"
         fi
     done
