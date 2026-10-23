@@ -6,6 +6,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
+import org.junit.Assert.assertNull
 
 /** Synthetic BYD responses only; validates typed, secret-free status handling. */
 class SignClassificationTest {
@@ -19,6 +21,19 @@ class SignClassificationTest {
     }
 
     private fun json(body: String) = MockResponse().setBody(BydProtocol.encrypt(body))
+
+    @Test fun notificationPolicySkipsAlreadySignedAndDeduplicatesByDayAndCategory() {
+        val date = LocalDate.of(2026, 10, 24)
+        val success = ActionResult(true, "签到成功")
+        val already = ActionResult(true, "今日已签到", skipped = true)
+        val network = ActionResult(false, "网络不可用",
+            failure = SignFailureKind.NETWORK)
+        assertEquals("2026-10-24:SUCCESS", SignNotificationPolicy.dailyKey(success, date))
+        assertEquals("2026-10-24:NETWORK", SignNotificationPolicy.dailyKey(network, date))
+        assertNull(SignNotificationPolicy.dailyKey(already, date))
+        assertEquals("2026-10-25:SUCCESS",
+            SignNotificationPolicy.dailyKey(success, date.plusDays(1)))
+    }
 
     @Test fun successHasNoFailure() = withResponse(json("""{"ret":200,"durationDays":9}""")) {
         assertTrue(it.success)
