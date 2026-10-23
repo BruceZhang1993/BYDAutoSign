@@ -6,6 +6,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Instant
@@ -106,7 +109,11 @@ internal object ResponseFields {
     }
 }
 
-internal class ProtocolException(message: String) : IOException(message)
+internal class ProtocolException(
+    message: String,
+    val failure: SignFailureKind = SignFailureKind.PROTOCOL,
+    val retryable: Boolean = false
+) : IOException(message)
 internal class AuthenticationExpired : IOException("会话已失效，请重新授权")
 
 internal data class SignOutcome(
@@ -114,7 +121,9 @@ internal data class SignOutcome(
     val message: String,
     val days: Int = 0,
     val shouldRetry: Boolean = false,
-    val authorizationExpired: Boolean = false
+    val authorizationExpired: Boolean = false,
+    val alreadySigned: Boolean = false,
+    val failure: SignFailureKind = SignFailureKind.NONE
 )
 
 /**
@@ -144,29 +153,56 @@ internal class NativeSignEngine(
     }
 
     fun sign(session: String): SignOutcome {
-        if (session.isBlank()) return SignOutcome(false, "需要重新授权")
+        if (session.isBlank()) return SignOutcome(false, "需要重新授权",
+            failure = SignFailureKind.NO_SESSION)
         return try {
             val json = request("activity/sign/signIn", BydProtocol.signPayload(session))
             if (ResponseFields.int(json, "ret") == 200) {
-                SignOutcome(true, "签到成功", (ResponseFields.int(json, "durationDays") ?: 0).coerceAtLeast(0))
+                SignOutcome(true, "签到成功",
+                    (ResponseFields.int(json, "durationDays") ?: 0).coerceAtLeast(0))
             } else {
-                // Only explicit server expiry indicators cause credential invalidation.
+                // Inspect only for known server signals; never show or store raw body.
                 val safeText = listOfNotNull(ResponseFields.text(json, "msg"),
                     ResponseFields.text(json, "message")).joinToString(" ")
                 val expired = Regex(
                     "session[_ ]?id.{0,32}(失效|过期|invalid|expired)|未登录|登录已过期|session expired|invalid session",
                     RegexOption.IGNORE_CASE
                 ).containsMatchIn(safeText)
-                SignOutcome(false, if (expired) "会话过期，需要重新授权" else "签到未成功",
-                    authorizationExpired = expired)
+                // If BYD reports an already-completed sign-in, stop attempts
+                // and suppress the system notification for that day.
+                val alreadySigned = !expired && Regex("已签到|已经签到|今日已签|重复签到|already signed",
+                    RegexOption.IGNORE_CASE).containsMatchIn(safeText)
+                when {
+                    alreadySigned -> SignOutcome(true, "今日已签到，无需重复执行",
+                        alreadySigned = true)
+                    expired -> SignOutcome(false, "会话过期，需要重新授权",
+                        authorizationExpired = true, failure = SignFailureKind.AUTH_EXPIRED)
+                    else -> SignOutcome(false, "签到未成功",
+                        failure = SignFailureKind.BUSINESS)
+                }
             }
         } catch (e: IOException) {
-            SignOutcome(false, when (e) {
-                is ProtocolException -> e.message ?: "响应格式异常"
-                else -> "网络不可用或请求超时"
-            }, shouldRetry = e !is ProtocolException)
+            val category = when (e) {
+                is ProtocolException -> e.failure
+                is SSLException -> SignFailureKind.TLS
+                is SocketTimeoutException -> SignFailureKind.TIMEOUT
+                is UnknownHostException -> SignFailureKind.NETWORK
+                else -> SignFailureKind.NETWORK
+            }
+            val message = when (category) {
+                SignFailureKind.TLS -> "安全连接失败，请检查证书和系统时间"
+                SignFailureKind.TIMEOUT -> "请求超时"
+                SignFailureKind.NETWORK -> "网络连接失败"
+                SignFailureKind.SERVER -> "比亚迪服务器暂时不可用"
+                SignFailureKind.HTTP_CLIENT -> "服务器拒绝签到请求"
+                else -> "协议或响应异常"
+            }
+            SignOutcome(false, message,
+                shouldRetry = if (e is ProtocolException) e.retryable
+                    else category == SignFailureKind.NETWORK || category == SignFailureKind.TIMEOUT,
+                failure = category)
         } catch (_: Exception) {
-            SignOutcome(false, "响应解析失败")
+            SignOutcome(false, "响应解析失败", failure = SignFailureKind.UNKNOWN)
         }
     }
 
@@ -200,8 +236,13 @@ internal class NativeSignEngine(
             .build()
         client.newCall(req).execute().use { response ->
             if (!response.isSuccessful) {
-                if (response.code in 400..499) throw ProtocolException("服务端拒绝请求（HTTP ${response.code}）")
-                throw IOException("HTTP ${response.code}")
+                if (response.code == 429 || response.code in 500..599)
+                    throw ProtocolException("服务端暂不可用（HTTP ${response.code}）",
+                        SignFailureKind.SERVER, retryable = true)
+                if (response.code in 400..499)
+                    throw ProtocolException("服务端拒绝请求（HTTP ${response.code}）",
+                        SignFailureKind.HTTP_CLIENT)
+                throw ProtocolException("服务端异常", SignFailureKind.SERVER)
             }
             val text = response.body?.string()?.takeIf { it.isNotBlank() }
                 ?: throw ProtocolException("服务端响应为空")
