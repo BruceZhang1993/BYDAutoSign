@@ -334,7 +334,8 @@ private fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit)
                     if (trace.lastAlarmAt > 0) {
                         InfoLine("上次触发延迟", "${trace.lastAlarmDelayMs / 1000} 秒")
                     }
-                    InfoLine("上次任务入队", formatDateTime(trace.lastEnqueueAt))
+                    InfoLine("上次任务提交", formatDateTime(trace.lastEnqueueAt))
+                    InfoLine("上次补偿提交", formatDateTime(trace.lastCompensateAt))
                     InfoLine("上次开始执行", formatDateTime(trace.lastStartAt))
                     InfoLine("上次结束执行", formatDateTime(trace.lastFinishAt))
                     InfoLine("最后执行状态", trace.lastState)
