@@ -204,6 +204,8 @@ class RootBridge(private val context: Context) {
                 !health.ok && start.exitCode == 124 &&
                     start.output.contains("CRON_STARTED") ->
                     "脚本报告启动，但命令未正常退出，且独立状态检查失败。"
+                health.exitCode == 124 ->
+                    "独立状态查询也超时（124），无法判断 crond 是否运行。"
                 !health.ok -> "未检测到运行中的定时服务。"
                 !hasTask -> "定时服务已运行，但任务表没有 BYD 签到命令。"
                 else -> "定时服务状态异常。"
@@ -241,6 +243,7 @@ class RootBridge(private val context: Context) {
         val cronSummary = when {
             !installed -> "先部署 Root 环境"
             cronLegacy -> "调度脚本版本较旧，请先点击“重新部署 Root 环境”"
+            scheduler.exitCode == 124 -> "定时状态检查超时（124），目前无法判断 crond 是否运行"
             !cronOk -> if (cronError.isNotBlank()) {
                 "定时服务未运行：" + cronError
             } else "定时服务未运行，请点击“修复定时调度”"
