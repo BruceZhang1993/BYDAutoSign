@@ -17,6 +17,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -46,11 +51,17 @@ private fun Dashboard(bridge: RootBridge) {
     var ports by remember { mutableStateOf("8088") }
     var busy by remember { mutableStateOf(false) }
     var resultText by remember { mutableStateOf("") }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // A foreground refresh and a post-action refresh must not race and leave
+    // the dashboard showing an older scheduler or Binder state.
+    val refreshMutex = remember { Mutex() }
 
     suspend fun reload() {
-        val newState = bridge.refresh()
-        state = newState
-        ports = newState.ports
+        refreshMutex.withLock {
+            val newState = bridge.refresh()
+            state = newState
+            ports = newState.ports
+        }
     }
 
     fun execute(action: suspend () -> ShellResult) {
@@ -68,7 +79,18 @@ private fun Dashboard(bridge: RootBridge) {
         }
     }
 
-    LaunchedEffect(Unit) { reload() }
+    // Android may keep the Activity and Compose tree alive while the app is
+    // backgrounded. LaunchedEffect(Unit) only ran once and missed those returns.
+    // ON_RESUME also runs on cold start, so one observer covers both paths.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && !busy) {
+                scope.launch { reload() }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Scaffold(
         topBar = { CenterAlignedTopAppBar(title = { Text("BYD Auto Sign") }) }
@@ -86,6 +108,22 @@ private fun Dashboard(bridge: RootBridge) {
                 Section("环境状态") {
                     HealthLine("Root 运行环境", state.rootRuntimeInstalled,
                         if (state.rootRuntimeInstalled) "已部署到 /data/adb/byd_sign" else "需要初始化")
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    HealthLine("定时调度（BusyBox crond）", state.cronRunning, state.cronStatus)
+                    if (state.rootRuntimeInstalled && !state.cronRunning && !state.cronNeedsUpgrade) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { execute { bridge.restartScheduler() } }
+                        ) { Text("修复定时调度") }
+                        Text(
+                            "修复后若仍显示未运行，可查看 Root 私有目录中的 logs/scheduler.log。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    HealthLine("Binder IPC", state.ipcConnected, state.ipcStatus)
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     HealthLine("微信 Hook（仅授权阶段需要）", state.hookConnected && state.hookConfigured,
                         if (!state.hookConnected) "未连接：请检查 LSPosed 作用域并启动微信"
@@ -119,12 +157,37 @@ private fun Dashboard(bridge: RootBridge) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(enabled = !busy, onClick = { execute { bridge.initialize() } }) {
-                            Text(if (state.rootRuntimeInstalled) "重新部署并授权" else "初始化并授权")
+                        Button(
+                            enabled = !busy,
+                            onClick = {
+                                execute {
+                                    if (state.rootRuntimeInstalled) bridge.deployRuntimeOnly()
+                                    else bridge.initialize()
+                                }
+                            }
+                        ) {
+                            Text(
+                                if (state.rootRuntimeInstalled) "重新部署 Root 环境"
+                                else "初始化并通过 Binder 授权"
+                            )
                         }
-                        OutlinedButton(enabled = !busy, onClick = { scope.launch { busy = true; try { reload() } finally { busy = false } } }) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { scope.launch { busy = true; try { reload() } finally { busy = false } } }
+                        ) {
                             Text("刷新")
                         }
+                    }
+                    if (!state.rootRuntimeInstalled) {
+                        TextButton(enabled = !busy, onClick = { execute { bridge.deployRuntimeOnly() } }) {
+                            Text("仅部署 Root 环境（不授权微信）")
+                        }
+                        Text(
+                            "初始化部署 Root 调度后，通过 Binder 获取一次性微信 code；" +
+                                "不会使用已移除的本地 HTTP 登录通道。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -148,8 +211,14 @@ private fun Dashboard(bridge: RootBridge) {
                         enabled = state.rootRuntimeInstalled && !busy,
                         onClick = { execute { bridge.authorize() } }
                     ) {
-                        Text("重新授权")
+                        Text("通过 Binder 重新授权")
                     }
+                    Text(
+                        "当前 Binder 授权针对主微信（会话槽位 8088）。" +
+                            "如果刚升级，请先更新 Root 环境；跨 User 微信分身仍需单独适配。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
             item {
@@ -175,12 +244,12 @@ private fun Dashboard(bridge: RootBridge) {
                     OutlinedTextField(
                         value = ports,
                         onValueChange = { ports = it },
-                        label = { Text("本地接口端口") },
-                        supportingText = { Text("主微信默认 8088，分身用逗号分隔，例如 8088,8098") },
+                        label = { Text("历史会话槽位（兼容旧数据）") },
+                        supportingText = { Text("当前 Binder 授权仅支持主微信 8088；其他槽位只能使用已有会话") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text("微信唤醒仅用于手动授权。保存新端口后，需要为该实例执行重新授权。",
+                    Text("此设置仅影响 Root 会话/签到槽位，不是 IPC 端口；不能自动开启分身授权。",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(8.dp))

@@ -25,19 +25,80 @@ jobs:
           sh -n app/src/main/assets/runtime/root-install.sh
           sh -n app/src/main/assets/runtime/byd_sign.sh
           sh -n app/src/main/assets/runtime/lib.sh
+          sh -n app/src/main/assets/runtime/webui_api.sh
       - name: Validate wxcode version mappings
         run: python3 scripts/check-hook-config.py
       - name: Verify authorization/sign-only separation
         run: python3 scripts/check-sign-session.py
-      - name: Build and test
+      - name: Verify cron daemon identification and scheduling recovery
+        run: python3 scripts/check-cron-scheduler.py
+      - name: Run unit tests and verify APK packaging
         run: bash ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
-      - name: Inspect single-APK payload
+      - name: Inspect single APK payload (not an upload artifact)
+        shell: bash
         run: |
+          set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
-          for item in assets/xposed_init assets/runtime/byd_sign.sh assets/runtime/lib.sh assets/runtime/root-install.sh assets/runtime/root-boot.sh assets/runtime/bin/arm64-v8a/curl assets/runtime/bin/arm64-v8a/openssl assets/runtime/bin/armeabi-v7a/curl assets/runtime/bin/armeabi-v7a/openssl; do
-            unzip -Z1 "$APK" | grep -Fx "$item" >/dev/null || { echo "Missing APK asset: $item"; exit 1; }
+          test -s "$APK"
+          for item in assets/xposed_init assets/runtime/byd_sign.sh assets/runtime/lib.sh assets/runtime/root-install.sh assets/runtime/root-boot.sh; do
+            unzip -Z1 "$APK" | grep -Fx "$item" >/dev/null || { echo "::error::Missing APK asset: $item"; exit 1; }
           done
-      - uses: actions/upload-artifact@v4
+          # The HTTP implementation and dependency must no longer be in source.
+          test ! -e app/src/main/java/xiaojw/hook/LoginHttpServer.java
+          ! grep -Rq 'org.nanohttpd:nanohttpd' app/build.gradle
+          sha256sum "$APK"
+
+      # Fork PRs cannot access private signing secrets. They run tests but do
+      # not create unsigned or debug artifacts masquerading as installable builds.
+      - name: Prepare release signing key
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          BYD_SIGNING_KEYSTORE_BASE64: ${{ secrets.BYD_SIGNING_KEYSTORE_BASE64 }}
+          BYD_SIGNING_STORE_PASSWORD: ${{ secrets.BYD_SIGNING_STORE_PASSWORD }}
+          BYD_SIGNING_KEY_ALIAS: ${{ secrets.BYD_SIGNING_KEY_ALIAS }}
+          BYD_SIGNING_KEY_PASSWORD: ${{ secrets.BYD_SIGNING_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in BYD_SIGNING_KEYSTORE_BASE64 BYD_SIGNING_STORE_PASSWORD BYD_SIGNING_KEY_ALIAS BYD_SIGNING_KEY_PASSWORD; do
+            if [[ -z "${!key}" ]]; then
+              echo "::error::Missing Actions secret: $key. Configure the persistent release signing key."
+              exit 1
+            fi
+          done
+          printf '%s' "$BYD_SIGNING_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/byd-release.jks"
+          chmod 600 "$RUNNER_TEMP/byd-release.jks"
+          echo "BYD_SIGNING_STORE_FILE=$RUNNER_TEMP/byd-release.jks" >> "$GITHUB_ENV"
+
+      - name: Build and verify signed Release APK
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          BYD_SIGNING_STORE_PASSWORD: ${{ secrets.BYD_SIGNING_STORE_PASSWORD }}
+          BYD_SIGNING_KEY_ALIAS: ${{ secrets.BYD_SIGNING_KEY_ALIAS }}
+          BYD_SIGNING_KEY_PASSWORD: ${{ secrets.BYD_SIGNING_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./gradlew :app:assembleRelease --stacktrace
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk dist/BYDAutoSign-release.apk
+
+          # The artifact must be a genuinely signed and verified APK.
+          APK=dist/BYDAutoSign-release.apk
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner | sort -V | tail -n 1)
+          test -n "$APKSIGNER" && test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          for item in assets/xposed_init assets/runtime/byd_sign.sh assets/runtime/lib.sh assets/runtime/root-install.sh assets/runtime/root-boot.sh assets/runtime/bin/arm64-v8a/curl assets/runtime/bin/arm64-v8a/openssl assets/runtime/bin/armeabi-v7a/curl assets/runtime/bin/armeabi-v7a/openssl; do
+            unzip -Z1 "$APK" | grep -Fx "$item" > /dev/null || { echo "::error::Missing APK asset: $item"; exit 1; }
+          done
+          sha256sum "$APK"
+
+      # GitHub added direct non-zipped artifacts in upload-artifact v7
+      # (archive: false); this is a raw APK in Actions Artifacts, not Releases.
+      - name: Upload original signed APK (no ZIP)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@v7
         with:
-          name: BYDAutoSign-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: dist/BYDAutoSign-release.apk
+          archive: false
+          if-no-files-found: error

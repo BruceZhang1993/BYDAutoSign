@@ -128,65 +128,10 @@ wake_wechat_silent() {
         return 0
     fi
 
-    log "警告: 仍未确认微信进程启动，继续尝试获取 code"
+    log "警告: 尚未确认微信进程已启动，Binder 授权可能需要重新唤醒"
     return 1
 }
 
-
-# === 统一获取 wx code ===
-# 参数:
-#   $1 = 端口
-#   $2 = appId
-#   $3 = curl 额外参数，可为空。例如: "--connect-timeout 10 --max-time 15"
-#   $4 = 可选，响应内容写入文件路径，便于调用方输出诊断信息
-#
-# 输出:
-#   成功: stdout 输出 code，return 0
-#   失败: stdout 不输出 code，return 1
-#
-# 说明:
-#   这里只统一“请求 /login 并解析 code”的核心逻辑；
-#   是否设置超时由调用方通过第 3 个参数决定，以保留各脚本原有行为。
-get_code_from_api() {
-    local port="$1"
-    local appid="$2"
-    local curl_opts="$3"
-    local response_file="$4"
-
-    if [ -z "$port" ] || [ -z "$appid" ]; then
-        [ -n "$response_file" ] && echo "" > "$response_file"
-        return 1
-    fi
-
-    local curl_bin=$(get_curl_bin)
-    local url="http://127.0.0.1:${port}/login?appId=${appid}"
-    local response=""
-
-    if [ -z "$curl_bin" ] || [ ! -x "$curl_bin" ]; then
-        [ -n "$response_file" ] && echo "错误: 模块 curl 不存在或不可执行: $WORK_DIR/curl" > "$response_file"
-        return 127
-    fi
-
-    # 本地 wxcode 不需要代理；固定 IPv4 可避免部分 ROM 的 localhost/IPv6 异常。
-    if [ -n "$curl_opts" ]; then
-        response=$($curl_bin -sS --noproxy "*" -4 $curl_opts "$url" 2>&1)
-    else
-        response=$($curl_bin -sS --noproxy "*" -4 "$url" 2>&1)
-    fi
-    local curl_ret=$?
-
-    [ -n "$response_file" ] && echo "$response" > "$response_file"
-    [ $curl_ret -ne 0 ] && return $curl_ret
-
-    local code=$(echo "$response" | grep -o '"code"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/"code"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/')
-
-    if [ -z "$code" ] || [ "$code" = "" ] || [ "$code" = "nu""ll" ]; then
-        return 1
-    fi
-
-    echo "$code"
-    return 0
-}
 
 # === 读取 CODE_API 端口列表（返回空格分隔的端口号）===
 get_code_api_ports() {
@@ -240,18 +185,119 @@ _is_signed_today() {
     return 1
 }
 
-# === 停止 crond ===
-stop_crond() {
-    find_busybox
-    $BUSYBOX pkill -f "crond.*${WORK_DIR}/cron\.d" 2>/dev/null
+# === crond lifecycle and observable health ===
+# BusyBox crond's argv format differs by Root manager and Android version.
+# /proc/pid/cwd is a fallback because crond changes directory to its spool.
+is_own_crond() {
+    local command_line="$1" cwd="$2" comm="$3"
+    # Never confuse a shell executing a crond command with the daemon itself.
+    case "$comm" in crond|busybox) ;; *) return 1 ;; esac
+    case "$command_line" in
+        *crond*" -c $WORK_DIR/cron.d "*|*crond*" -c$WORK_DIR/cron.d "*)
+            return 0
+            ;;
+    esac
+    if [ "$cwd" = "$WORK_DIR/cron.d" ]; then
+        case "$command_line" in
+            *crond*) return 0 ;;
+        esac
+    fi
+    return 1
 }
 
-# === 重启 crond ===
+own_crond_pids() {
+    local proc pid comm command_line cwd
+    # First filter with the shell builtin read: no sed/tr/readlink/cat
+    # subprocess is spawned for unrelated Android processes. On a device
+    # with hundreds of /proc entries, the old scanner exceeded the 8s
+    # health-check timeout and made both repair and status report 124.
+    for proc in /proc/[0-9]*; do
+        [ -d "$proc" ] || continue
+        pid=${proc#/proc/}
+        # Read /proc/<pid>/comm using the shell builtin. A kernel thread or
+        # unrelated process should be discarded without spawning a process.
+        comm=""
+        IFS= read -r comm < "$proc/comm" 2>/dev/null || continue
+        case "$comm" in
+            crond|busybox) ;;
+            *) continue ;;
+        esac
+        [ -r "$proc/cmdline" ] || continue
+        command_line=$(tr '\000' ' ' < "$proc/cmdline" 2>/dev/null) || continue
+        [ -n "$command_line" ] || continue
+        cwd=$(readlink "$proc/cwd" 2>/dev/null) || cwd=""
+        if is_own_crond "$command_line" "$cwd" "$comm"; then
+            # Exclude zombies; this invokes a single process per matching
+            # candidate rather than per Android process.
+            [ -r "$proc/status" ] || continue
+            if grep -q '^State:[[:space:]]*Z' "$proc/status" 2>/dev/null; then
+                continue
+            fi
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
+cron_running() {
+    [ -n "$(own_crond_pids)" ]
+}
+
+stop_crond() {
+    local pid
+    for pid in $(own_crond_pids); do
+        kill "$pid" 2>/dev/null || true
+    done
+}
+
+find_crond_busybox() {
+    local candidate
+    for candidate in \
+        /data/adb/ksu/bin/busybox \
+        /data/adb/ap/bin/busybox \
+        /data/adb/ap/busybox \
+        /data/adb/magisk/busybox \
+        /data/adb/modules/busybox-ndk/system/xbin/busybox \
+        /system/xbin/busybox \
+        /system/bin/busybox; do
+        if [ -x "$candidate" ] &&
+            "$candidate" --list 2>/dev/null | grep -qx crond; then
+            BUSYBOX="$candidate"
+            return 0
+        fi
+    done
+    if command -v busybox >/dev/null 2>&1 &&
+        busybox --list 2>/dev/null | grep -qx crond; then
+        BUSYBOX="$(command -v busybox)"
+        return 0
+    fi
+    return 1
+}
+
 restart_crond() {
+    local status=0
+    mkdir -p "$LOG_DIR" "$WORK_DIR/cron.d" || return 1
+    [ -s "$WORK_DIR/cron.d/root" ] || {
+        echo "CRON_ERROR: root crontab is missing" >&2
+        return 1
+    }
+    if ! find_crond_busybox; then
+        echo "CRON_ERROR: no executable BusyBox with crond applet found" >&2
+        return 127
+    fi
+    # Find a replacement before terminating any existing owned scheduler.
     stop_crond
     sleep 1
-    find_busybox
-    $BUSYBOX crond -b -c "$WORK_DIR/cron.d" -L "$WORK_DIR/logs/cron_$(date '+%Y-%m-%d').log" 2>/dev/null
+    "$BUSYBOX" crond -b -c "$WORK_DIR/cron.d" -L "$LOG_DIR/cron.log" </dev/null >/dev/null 2>>"$LOG_DIR/scheduler.log" || status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "CRON_ERROR: crond launch failed (exit $status)" >&2
+        return "$status"
+    fi
+    sleep 1
+    if ! cron_running; then
+        echo "CRON_ERROR: crond not detectable after launch (check ps and cron.log)" >&2
+        return 1
+    fi
+    return 0
 }
 
 # === 日志函数 ===

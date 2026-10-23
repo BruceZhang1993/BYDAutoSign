@@ -7,3 +7,8 @@ local.properties
 app/src/main/assets/runtime/bin/
 *.apk
 *.aab
+
+# Local Android app signing credentials
+.signing/
+*.jks
+*.keystore

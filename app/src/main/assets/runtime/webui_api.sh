@@ -781,70 +781,6 @@ test_notification() {
     echo "=== 测试完成 ==="
 }
 
-# 测试获取 code（支持多端口）
-test_get_code() {
-    local APPID_P1="wxf62054"
-    local APPID_P2="ec313d6f53"
-    local APPID="${APPID_P1}${APPID_P2}"
-    local curl_bin=$(get_curl_bin)
-
-    # 读取端口配置
-    local ports=$(get_code_api_ports)
-
-    echo "=== 开始测试获取 Code (共 $(echo "$ports" | wc -w) 个端口) ==="
-    echo ""
-
-    local all_ok=true
-
-    for port in $ports; do
-        port=$(echo "$port" | tr -d ' ')
-        if [ -z "$port" ]; then
-            continue
-        fi
-        echo "[端口 ${port}] 测试中..."
-
-        # 1. 先检测接口是否可达
-        local api_host="127.0.0.1"
-        local connect_result=$($curl_bin -s --connect-timeout 5 --max-time 5 -o /dev/null -w "%{http_code}" "http://${api_host}:${port}/" 2>/dev/null)
-        if [ -z "$connect_result" ] || [ "$connect_result" = "000" ]; then
-            echo "[端口 ${port}] 本地接口服务不可达 (${api_host}:${port})，请确保 wxcode 模块已启动"
-            all_ok=false
-            continue
-        fi
-
-        # 2. 尝试获取 code
-        # 统一调用 lib.sh 中的 get_code_from_api。
-        # WebUI 测试保留原超时设置：--connect-timeout 10 --max-time 15。
-        local response_file="$WORK_DIR/.code_test_response_${port}_$$"
-        local code=""
-        code=$(get_code_from_api "$port" "$APPID" "--connect-timeout 10 --max-time 15" "$response_file")
-        local ret=$?
-        local response=$(cat "$response_file" 2>/dev/null)
-        rm -f "$response_file" 2>/dev/null
-
-        if [ -z "$response" ]; then
-            echo "[端口 ${port}] 接口返回为空，请检查本地接口服务"
-            all_ok=false
-            continue
-        fi
-
-        if [ $ret -eq 0 ] && [ -n "$code" ] && [ "$code" != "" ]; then
-            echo "[端口 ${port}] 成功: 接口可达，code 获取成功 (${code:0:10}...)"
-        else
-            echo "[端口 ${port}] 接口可达，但获取 code 失败，响应: $response"
-            all_ok=false
-        fi
-        echo ""
-    done
-
-    echo "=== 测试完成 ==="
-    if [ "$all_ok" = true ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
 # === CODE_API 端口配置管理 ===
 
 # 读取 CODE_API 端口配置；文件内部使用 key=value，对外仍返回 JSON 兼容 WebUI。
@@ -975,9 +911,6 @@ case "$1" in
     test_notification)
         test_notification
         ;;
-    test_get_code)
-        test_get_code
-        ;;
     read_code_api_config)
         read_code_api_config
         ;;
@@ -988,7 +921,7 @@ case "$1" in
         save_code_api_config_base64 "$2"
         ;;
     *)
-        echo "用法: $0 {init|check_status|check_status_detail|last_sign_date|do_sign|do_sign_async|check_sign_result|list_logs|read_log|delete_log|delete_all_logs|read_email_config|save_email_config|save_email_config_file|save_email_config_base64|get_version|read_cron_config|save_cron_config|save_cron_config_base64|test_notification|test_get_code|read_code_api_config|save_code_api_config|save_code_api_config_base64}"
+        echo "用法: $0 {init|check_status|check_status_detail|last_sign_date|do_sign|do_sign_async|check_sign_result|list_logs|read_log|delete_log|delete_all_logs|read_email_config|save_email_config|save_email_config_file|save_email_config_base64|get_version|read_cron_config|save_cron_config|save_cron_config_base64|test_notification|read_code_api_config|save_code_api_config|save_code_api_config_base64}"
         exit 1
         ;;
 esac

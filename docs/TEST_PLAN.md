@@ -13,7 +13,7 @@
 - [ ] Root 授权弹窗、一键初始化、重复部署无数据丢失
 - [ ] LSPosed 作用域只选微信；微信重启后 `/whoami` 可连接
 - [ ] 既有微信版本 8.0.49 / 8.0.62 / 8.0.70 / 8.0.71 / 8.0.72 / 8.0.74 / 8.0.76 的兼容性（按测试设备逐项验证）
-- [ ] 点击立即签到，code → session_id → signIn 端到端成功
+- [ ] 点击初始化/重新授权，经 Binder 获得 code，Root stdin 兑换 session_id，然后立即签到成功
 - [ ] 签到成功后状态文件正确；下次 cron 自动跳过
 - [ ] 关屏、Doze 和无网络场景：成功或可解释失败/可重试
 - [ ] 系统分身端口与多账号签到隔离
@@ -56,3 +56,19 @@
 - [ ] 未授权端口跳过并提示重新授权，不产生微信唤醒
 - [ ] session 过期时清除对应凭证，其他账号不受影响
 - [ ] 新增/删除端口、重复授权、Root 目录迁移不影响既有设置
+
+## Binder-only IPC 迁移验收
+
+- [x] 编译及静态检查：Hook 只注册 Binder，不启动 NanoHTTPD 服务器
+- [x] 编译及静态检查：MainActivity/RootBridge 的状态/DEX 重新探测/取码通过 Binder
+- [x] 模拟 Shell 测试：`authorize-stdin` 从 stdin 接收 code，保存仅 Root 可读的 session + 非敏感来源字段
+- [x] 静态检查：签到主路径不调用微信、Binder 或 BYD code 兑换端点
+- [x] 移除本地 `/login`、`/probe`、`/whoami` 等 HTTP 服务和测试入口
+- [x] 用户设备截图：主用户微信 8.0.79 的 Binder 注册与 Ping/Pong 正常
+- [ ] 在新 APK 上主动点击“通过 Binder 重新授权”，确认状态明确显示来源 `Binder IPC`（不能用历史 HTTP 初始化结果替代）
+- [ ] 用上述 Binder 生成的 session 执行立即签到并成功
+- [ ] 重启微信后重新注册 Binder，关闭管理 App、重启 Root scheduler，并验证预定时间自动签到
+- [ ] 跨 User 微信分身：安全的 Binder/Root Broker 注册与授权（当前不支持）
+- [ ] 签名 Release APK 可从 GitHub Actions Artifacts 直接下载并覆盖更新（当前签名 Secret 映射问题未解决）
+
+> 本版本已移除旧 HTTP 网络接口，因此设备验证失败时需要暂缓合并或回滚 PR，而不是在运行时秘密回退到无鉴权 HTTP。
