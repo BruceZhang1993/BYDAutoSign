@@ -178,8 +178,19 @@ class RootBridge(private val context: Context) {
 
     /** Restart only BYDAutoSign's own Root crond, never other Root modules. */
     suspend fun restartScheduler(): ShellResult = withContext(Dispatchers.IO) {
-        shell("test -f /data/adb/service.d/byd_auto_sign.sh && " +
+        val result = shell("test -f /data/adb/service.d/byd_auto_sign.sh && " +
             "/system/bin/sh /data/adb/service.d/byd_auto_sign.sh", 30)
+        if (result.ok) {
+            ShellResult(0, "定时服务已重新启动。请刷新确认 crond 状态。")
+        } else {
+            val diagnostic = shell("tail -n 25 /data/adb/byd_sign/logs/scheduler.log " +
+                "2>/dev/null", 10).output.lineSequence()
+                .filter { it.contains("CRON_ERROR:") || it.contains("CRON_FAILED") }
+                .takeLastSafe(5).joinToString("\n").takeLast(1200)
+            ShellResult(result.exitCode, "定时服务启动失败：" +
+                if (diagnostic.isNotBlank()) "\n" + diagnostic
+                else "\n" + result.output.takeLast(600))
+        }
     }
 
     suspend fun signNow(): ShellResult = withContext(Dispatchers.IO) {
