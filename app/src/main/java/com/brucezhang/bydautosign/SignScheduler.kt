@@ -164,10 +164,13 @@ internal object SignScheduler {
         val now = System.currentTimeMillis()
         val stale = store.enabled && SignRecoveryPolicy.planOverdue(prior.nextAt, now)
         val absent = store.enabled && prior.nextAt <= 0L
-        if (force || stale || absent) {
+        val permissionChanged = store.enabled && prior.nextAt > 0L &&
+            SignRecoveryPolicy.permissionChanged(prior.exact, exactAllowed(context))
+        if (force || stale || absent || permissionChanged) {
             val detail = when {
                 stale -> "overdue"
                 absent -> "missing"
+                permissionChanged -> "permission_changed"
                 else -> "rearmed"
             }
             runCatching {

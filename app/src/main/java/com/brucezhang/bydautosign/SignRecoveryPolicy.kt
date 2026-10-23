@@ -28,6 +28,9 @@ internal object SignRecoveryPolicy {
             SignDatePolicy.completedLocalDate(now, zone)
     }
 
+    fun permissionChanged(previousExact: Boolean, currentExact: Boolean): Boolean =
+        previousExact != currentExact
+
     fun planOverdue(nextAt: Long, now: Long): Boolean =
         nextAt > 0 && now >= nextAt && now - nextAt >= OVERDUE_GRACE_MS
 
@@ -37,8 +40,10 @@ internal object SignRecoveryPolicy {
      */
     fun shouldCompensate(
         enabled: Boolean, signedToday: Boolean, now: Long,
-        firstSlotToday: Long, lastAttemptAt: Long
+        firstSlotToday: Long, lastAttemptAt: Long, zone: ZoneId = ZoneId.systemDefault()
     ): Boolean = enabled && !signedToday && now >= firstSlotToday &&
         (lastAttemptAt <= 0 || lastAttemptAt > now ||
+            SignDatePolicy.completedLocalDate(lastAttemptAt, zone) !=
+                SignDatePolicy.completedLocalDate(now, zone) ||
             now - lastAttemptAt >= COMPENSATION_COOLDOWN_MS)
 }

@@ -20,6 +20,13 @@ class SignRecoveryPolicyTest {
         assertFalse(SignRecoveryPolicy.planOverdue(alarm, at(24, 6, 0)))
     }
 
+    @Test fun permissionRevocationRequiresNewAlarmEvenWhenPlanIsInFuture() {
+        assertTrue(SignRecoveryPolicy.permissionChanged(true, false))
+        assertTrue(SignRecoveryPolicy.permissionChanged(false, true))
+        assertFalse(SignRecoveryPolicy.permissionChanged(true, true))
+        assertFalse(SignRecoveryPolicy.permissionChanged(false, false))
+    }
+
     @Test fun compensationRequiresFirstSlotAndCooldown() {
         val morning = at(24, 7, 1)
         assertFalse(SignRecoveryPolicy.shouldCompensate(false, false, at(24, 8, 0), morning, 0))
@@ -30,6 +37,9 @@ class SignRecoveryPolicyTest {
             true, false, at(24, 7, 15), morning, at(24, 7, 2)))
         assertTrue(SignRecoveryPolicy.shouldCompensate(
             true, false, at(24, 7, 32), morning, at(24, 7, 2)))
+        // A previous-day attempt must never prevent today's 00:01 recovery.
+        assertTrue(SignRecoveryPolicy.shouldCompensate(
+            true, false, at(25, 0, 1), at(25, 0, 1), at(24, 23, 59), zone))
         // A restored phone clock may be earlier than the last recorded attempt.
         assertTrue(SignRecoveryPolicy.shouldCompensate(
             true, false, at(24, 7, 1), morning, at(24, 23, 59)))

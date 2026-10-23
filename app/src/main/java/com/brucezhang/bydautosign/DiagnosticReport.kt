@@ -85,7 +85,7 @@ internal object DiagnosticReport {
         ScheduleRecoverySource.entries.firstOrNull { it.name == text }?.name ?: "UNKNOWN"
 
     private fun safeRecoveryResult(text: String): String =
-        if (text in setOf("overdue", "missing", "rearmed", "failed")) text else "unknown"
+        if (text in setOf("overdue", "missing", "permission_changed", "rearmed", "failed")) text else "unknown"
 
     private fun safeFailureName(text: String): String =
         SignFailureKind.entries.firstOrNull { it.name == text }?.name ?: "NONE"
