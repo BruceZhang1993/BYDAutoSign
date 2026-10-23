@@ -1,6 +1,9 @@
 package com.brucezhang.bydautosign
 
+import android.Manifest
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -10,10 +13,12 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -75,7 +80,9 @@ internal data class NativeUiState(
     val next: String = "",
     val lastResult: String = "尚未执行",
     val lastRun: String = "",
-    val signedToday: Boolean = false
+    val signedToday: Boolean = false,
+    val history: List<SignHistoryEntry> = emptyList(),
+    val scheduleTrace: ScheduleSnapshot = ScheduleSnapshot()
 )
 
 internal class NativeSignManager(private val context: android.content.Context) {
@@ -89,6 +96,13 @@ internal class NativeSignManager(private val context: android.content.Context) {
         SignScheduler.compensate(context)
         val formatted = if (store.lastRun > 0) DateTimeFormatter.ofPattern("MM-dd HH:mm")
             .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(store.lastRun)) else ""
+        val telemetry = ScheduleTelemetry(context).snapshot()
+        val next = when {
+            !store.enabled -> "自动签到已关闭"
+            telemetry.nextAt <= 0 -> "尚未建立调度"
+            else -> "下次 ${formatDateTime(telemetry.nextAt)} · " +
+                if (telemetry.exact) "精确唤醒" else "非精确唤醒"
+        }
         NativeUiState(
             ipc = IpcBrokerService.diagnostic(),
             connected = IpcBrokerService.connected(),
@@ -100,10 +114,12 @@ internal class NativeSignManager(private val context: android.content.Context) {
             enabled = store.enabled,
             times = store.times,
             exact = SignScheduler.exactAllowed(context),
-            next = SignScheduler.reschedule(context),
+            next = next,
             lastResult = store.lastResult,
             lastRun = formatted,
-            signedToday = store.signedToday()
+            signedToday = store.signedToday(),
+            history = SignHistory(context).list(),
+            scheduleTrace = telemetry
         )
     }
 
@@ -162,7 +178,11 @@ internal class NativeSignManager(private val context: android.content.Context) {
         }
     }
 
-    suspend fun sign(): ActionResult = withContext(Dispatchers.IO) { SignCoordinator.sign(context) }
+    suspend fun sign(): ActionResult = withContext(Dispatchers.IO) {
+        val result = SignCoordinator.sign(context, SignOrigin.MANUAL)
+        SignNotifier(context).notifyResult(result)
+        result
+    }
 
     suspend fun saveSchedule(enabled: Boolean, times: String): ActionResult = withContext(Dispatchers.IO) {
         val valid = ScheduleTimes.normalize(times) != null
@@ -182,6 +202,12 @@ private fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit)
     val scope = rememberCoroutineScope()
     val owner = LocalLifecycleOwner.current
     val guard = remember { Mutex() }
+    val context = LocalContext.current
+    var notificationsAllowed by remember { mutableStateOf(SignNotifier.allowed(context)) }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { notificationsAllowed = SignNotifier.allowed(context) }
+    var showAllHistory by remember { mutableStateOf(false) }
     var state by remember { mutableStateOf(NativeUiState()) }
     var enabled by remember { mutableStateOf(true) }
     var times by remember { mutableStateOf("00:01,07:01,13:01,22:01") }
@@ -214,7 +240,10 @@ private fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit)
 
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && !busy) scope.launch { reload() }
+            if (event == Lifecycle.Event.ON_RESUME && !busy) {
+                notificationsAllowed = SignNotifier.allowed(context)
+                scope.launch { reload() }
+            }
         }
         owner.lifecycle.addObserver(observer)
         onDispose { owner.lifecycle.removeObserver(observer) }
@@ -299,6 +328,39 @@ private fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit)
                 }
             }
             item {
+                UiSection("调度诊断") {
+                    val trace = state.scheduleTrace
+                    InfoLine("上次闹钟触发", formatDateTime(trace.lastAlarmAt))
+                    if (trace.lastAlarmAt > 0) {
+                        InfoLine("上次触发延迟", "${trace.lastAlarmDelayMs / 1000} 秒")
+                    }
+                    InfoLine("上次任务入队", formatDateTime(trace.lastEnqueueAt))
+                    InfoLine("上次开始执行", formatDateTime(trace.lastStartAt))
+                    InfoLine("上次结束执行", formatDateTime(trace.lastFinishAt))
+                    InfoLine("最后执行状态", trace.lastState)
+                    InfoLine("上次调度自检", formatDateTime(trace.lastWatchdogAt))
+                }
+            }
+            item {
+                UiSection("系统通知") {
+                    Text("签到成功或最终失败时通知；今日已签到、重复调度和重试过程不通知。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (notificationsAllowed) {
+                        Text("通知权限已开启", color = MaterialTheme.colorScheme.primary)
+                    } else if (Build.VERSION.SDK_INT >= 33) {
+                        Text("通知未开启，系统不会展示签到结果提醒。",
+                            style = MaterialTheme.typography.bodySmall)
+                        FilledTonalButton(onClick = {
+                            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }) { Text("允许签到通知") }
+                    } else {
+                        Text("请在系统应用通知设置中开启权限。",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+            item {
                 UiSection("签到任务") {
                     Button(modifier = Modifier.fillMaxWidth(),
                         enabled = !busy && state.sessionReady,
@@ -307,6 +369,42 @@ private fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit)
                     if (state.lastRun.isNotBlank()) {
                         Text("上次执行：${state.lastRun} · ${state.lastResult}",
                             style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+            item {
+                UiSection("签到历史") {
+                    Text("只保留最近 100 次真实尝试，包含失败重试；不保存会话或服务器原文。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (state.history.size > 8) {
+                        TextButton(onClick = { showAllHistory = !showAllHistory }) {
+                            Text(if (showAllHistory) "收起历史" else "查看全部 ${state.history.size} 条")
+                        }
+                    }
+                }
+            }
+            if (state.history.isEmpty()) {
+                item {
+                    Text("尚无签到历史", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                items(if (showAllHistory) state.history else state.history.take(8)) { record ->
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("${record.status.label} · ${record.origin.label} · ${formatDateTime(record.timestamp)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium)
+                        Text(
+                            if (record.status == SignRecordStatus.FAILED)
+                                "${record.failure.label} · 第 ${record.attempt} 次尝试"
+                            else if (record.status == SignRecordStatus.ALREADY_SIGNED)
+                                "已签到，不再发送通知"
+                            else "签到成功",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        HorizontalDivider()
                     }
                 }
             }
@@ -343,3 +441,7 @@ private fun InfoLine(label: String, value: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
+
+private fun formatDateTime(millis: Long): String =
+    if (millis <= 0L) "暂无记录" else DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
+        .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(millis))
