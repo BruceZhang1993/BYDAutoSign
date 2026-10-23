@@ -37,4 +37,13 @@ assert "cron_running" in boot and "CRON_STOPPED" in boot
 assert "root-boot.sh" in installer
 assert "restartScheduler" in bridge and "cronRunning" in bridge
 assert "CRON_STARTED" in boot
+assert '</dev/null >/dev/null 2>>"$LOG_DIR/scheduler.log"' in lib, (
+    "Background crond must not inherit Root command stdio descriptors"
+)
+assert 'process.outputStream.close()' in bridge, (
+    "Regular Root commands must close their unused stdin pipe"
+)
+assert 'start.exitCode == 124' in bridge and 'CRON_RUNNING' in bridge and (
+    'hasTask' in bridge
+), "Scheduler repair must verify the live daemon after the launcher returns"
 print("Cron process identity, health probe and restart invariants passed.")
