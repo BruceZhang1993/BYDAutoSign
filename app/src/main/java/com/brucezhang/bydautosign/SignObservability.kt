@@ -131,6 +131,14 @@ internal object SignNotificationPolicy {
         if (result.skipped) return null
         return "$date:${if (result.ok) "SUCCESS" else result.failure.name}"
     }
+
+    /** Copy the persisted Set; Android SharedPreferences returns a live Set. */
+    fun keysForToday(
+        storedDate: String, today: LocalDate, storedKeys: Set<String>
+    ): Set<String> = if (storedDate == today.toString()) storedKeys.toSet() else emptySet()
+
+    fun shouldNotify(key: String?, todayKeys: Set<String>): Boolean =
+        key != null && key !in todayKeys
 }
 
 /** One notification per day and outcome category; skipped/already-signed never alerts. */
@@ -138,10 +146,16 @@ internal class SignNotifier(private val context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("byd_sign_notifications", Context.MODE_PRIVATE)
 
     fun notifyResult(result: ActionResult) {
-        val key = SignNotificationPolicy.dailyKey(result, LocalDate.now()) ?: return
+        val today = LocalDate.now()
+        val key = SignNotificationPolicy.dailyKey(result, today) ?: return
         if (!allowed(context)) return
         synchronized(monitor) {
-            if (prefs.getString("last_key", "") == key) return
+            val sentToday = SignNotificationPolicy.keysForToday(
+                prefs.getString("notified_date", "") ?: "",
+                today,
+                prefs.getStringSet("notified_keys", emptySet()) ?: emptySet()
+            )
+            if (!SignNotificationPolicy.shouldNotify(key, sentToday)) return
             try {
                 val manager = context.getSystemService(NotificationManager::class.java)
                 val channelId = "byd_sign_result"
@@ -160,7 +174,12 @@ internal class SignNotifier(private val context: Context) {
                     .setCategory(Notification.CATEGORY_STATUS)
                     .build()
                 manager.notify(NOTIFICATION_ID, notification)
-                prefs.edit().putString("last_key", key).apply()
+                // A daily Set prevents A→B→A categories from notifying A twice.
+                // Persist the day and keys together to roll over at midnight.
+                prefs.edit()
+                    .putString("notified_date", today.toString())
+                    .putStringSet("notified_keys", sentToday + key)
+                    .commit()
             } catch (_: RuntimeException) {
                 // Notifications are best-effort: permission/system errors must
                 // never convert a successful sign-in into a failed Worker/UI job.
