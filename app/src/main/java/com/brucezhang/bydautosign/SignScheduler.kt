@@ -77,6 +77,7 @@ internal object SignScheduler {
         manager.cancel(alarm)
         if (!store.enabled) {
             WorkManager.getInstance(context).cancelUniqueWork(WATCHDOG_NAME)
+            ScheduleTelemetry(context).planned(0, false)
             return "自动签到已关闭"
         }
         // If an Android 12+ exact-alarm grant is revoked, existing alarms may
@@ -88,10 +89,12 @@ internal object SignScheduler {
         )
         val next = ScheduleTimes.next(store.times)
         val millis = next.toInstant().toEpochMilli()
-        if (exactAllowed(context)) {
+        var scheduledExact = exactAllowed(context)
+        if (scheduledExact) {
             try {
                 manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
             } catch (_: SecurityException) {
+                scheduledExact = false
                 manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
             }
         } else {
@@ -99,8 +102,9 @@ internal object SignScheduler {
             // This still wakes in Doze, but delivery can be substantially delayed.
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
         }
+        ScheduleTelemetry(context).planned(millis, scheduledExact)
         return "下次 ${next.format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))}" +
-            if (exactAllowed(context)) " · 精确唤醒" else " · 非精确（需授权闹钟）"
+            if (scheduledExact) " · 精确唤醒" else " · 非精确（需授权闹钟）"
     }
 
     fun enqueue(context: Context) {
@@ -112,12 +116,14 @@ internal object SignScheduler {
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        ScheduleTelemetry(context).enqueued()
     }
 
     fun compensate(context: Context) {
         val store = SignStore(context)
         if (store.enabled && !store.signedToday() &&
             !ZonedDateTime.now().isBefore(ScheduleTimes.firstToday(store.times))) {
+            ScheduleTelemetry(context).compensation()
             enqueue(context)
         }
     }
@@ -135,6 +141,7 @@ internal object SignScheduler {
 /** Manifest receiver is allowed to enqueue durable work; network work is never run inside onReceive. */
 class SignAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        ScheduleTelemetry(context).alarmFired()
         SignScheduler.reschedule(context)
         SignScheduler.enqueue(context)
     }
@@ -149,17 +156,38 @@ class SignRescheduleReceiver : BroadcastReceiver() {
 
 class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        val telemetry = ScheduleTelemetry(applicationContext)
         val store = SignStore(applicationContext)
-        if (!store.enabled || store.signedToday()) return@withContext Result.success()
-        val response = SignCoordinator.sign(applicationContext)
-        if (response.retry && runAttemptCount < 4) Result.retry() else Result.success()
-        // Non-retryable business/auth failure remains visible in the app.
+        if (!store.enabled) {
+            telemetry.finished("自动签到已关闭")
+            return@withContext Result.success()
+        }
+        if (store.signedToday()) {
+            telemetry.finished("今日已签到，跳过")
+            return@withContext Result.success()
+        }
+        telemetry.started()
+        val response = SignCoordinator.sign(applicationContext,
+            SignOrigin.SCHEDULED, runAttemptCount + 1)
+        if (response.retry && runAttemptCount < 4) {
+            telemetry.finished("可重试失败 · ${response.failure.label} · 等待 WorkManager 重试")
+            return@withContext Result.retry()
+        }
+        telemetry.finished(when {
+            response.skipped -> "今日已签到，跳过"
+            response.ok -> "签到成功"
+            else -> "签到失败 · ${response.failure.label}"
+        })
+        // Notify only the terminal result; never alert for retries or already-signed.
+        SignNotifier(applicationContext).notifyResult(response)
+        Result.success()
     }
 }
 
 /** Low-frequency safety net if the OS silently discards an exact alarm. */
 class SignWatchdogWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        ScheduleTelemetry(applicationContext).watchdog()
         SignScheduler.reschedule(applicationContext)
         SignScheduler.compensate(applicationContext)
         Result.success()

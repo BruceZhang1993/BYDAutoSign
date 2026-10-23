@@ -15,6 +15,9 @@
   → SignCoordinator (今日幂等、互斥)
   → NativeSignEngine.sign (读已缓存 BYD session，不唤醒微信)
   → SignStore (记录成功日期、结果、连续天数)
+  → SignHistory (100条结构化执行记录)
+  → ScheduleTelemetry (计划/闹钟/入队/执行/自检)
+  → SignNotifier (首次成功或终态失败；已签到及重试中不通知)
 ```
 
 ## Root 已彻底退出运行链
@@ -37,7 +40,7 @@ WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可
 
 ## 已知限制
 
-- 主微信 Binder 取码真机全链路、线上协议、锁屏、重启及网络恢复需验证。
+- 主微信 Binder 取码、线上成功签到、锁屏调度、重启恢复及跨天复用已经当前设备实机验收；网络恢复、会话过期及其他 ROM 仍待专项验证。
 - 跨 Android User 微信分身暂不支持新授权；不隐式读取旧 Root 会话。
 - 尚未实现主动自动重授权、通知配置、多账号/多品牌 Provider。
 - 安卓进程被系统限制、精确闹钟特权被撤销时执行可能延迟。

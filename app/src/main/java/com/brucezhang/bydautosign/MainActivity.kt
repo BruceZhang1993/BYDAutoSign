@@ -8,22 +8,8 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import com.brucezhang.bydautosign.ipc.IpcBrokerService
@@ -32,7 +18,6 @@ import java.net.ConnectException
 import java.net.UnknownHostException
 import java.net.SocketTimeoutException
 import javax.net.ssl.SSLException
-import java.security.GeneralSecurityException
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -75,7 +60,9 @@ internal data class NativeUiState(
     val next: String = "",
     val lastResult: String = "尚未执行",
     val lastRun: String = "",
-    val signedToday: Boolean = false
+    val signedToday: Boolean = false,
+    val history: List<SignHistoryEntry> = emptyList(),
+    val scheduleTrace: ScheduleSnapshot = ScheduleSnapshot()
 )
 
 internal class NativeSignManager(private val context: android.content.Context) {
@@ -89,6 +76,13 @@ internal class NativeSignManager(private val context: android.content.Context) {
         SignScheduler.compensate(context)
         val formatted = if (store.lastRun > 0) DateTimeFormatter.ofPattern("MM-dd HH:mm")
             .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(store.lastRun)) else ""
+        val telemetry = ScheduleTelemetry(context).snapshot()
+        val next = when {
+            !store.enabled -> "自动签到已关闭"
+            telemetry.nextAt <= 0 -> "尚未建立调度"
+            else -> "下次 ${formatDateTime(telemetry.nextAt)} · " +
+                if (telemetry.exact) "精确唤醒" else "非精确唤醒"
+        }
         NativeUiState(
             ipc = IpcBrokerService.diagnostic(),
             connected = IpcBrokerService.connected(),
@@ -100,10 +94,12 @@ internal class NativeSignManager(private val context: android.content.Context) {
             enabled = store.enabled,
             times = store.times,
             exact = SignScheduler.exactAllowed(context),
-            next = SignScheduler.reschedule(context),
+            next = next,
             lastResult = store.lastResult,
             lastRun = formatted,
-            signedToday = store.signedToday()
+            signedToday = store.signedToday(),
+            history = SignHistory(context).list(),
+            scheduleTrace = telemetry
         )
     }
 
@@ -162,7 +158,11 @@ internal class NativeSignManager(private val context: android.content.Context) {
         }
     }
 
-    suspend fun sign(): ActionResult = withContext(Dispatchers.IO) { SignCoordinator.sign(context) }
+    suspend fun sign(): ActionResult = withContext(Dispatchers.IO) {
+        val result = SignCoordinator.sign(context, SignOrigin.MANUAL)
+        SignNotifier(context).notifyResult(result)
+        result
+    }
 
     suspend fun saveSchedule(enabled: Boolean, times: String): ActionResult = withContext(Dispatchers.IO) {
         val valid = ScheduleTimes.normalize(times) != null
@@ -176,170 +176,7 @@ internal class NativeSignManager(private val context: android.content.Context) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val owner = LocalLifecycleOwner.current
-    val guard = remember { Mutex() }
-    var state by remember { mutableStateOf(NativeUiState()) }
-    var enabled by remember { mutableStateOf(true) }
-    var times by remember { mutableStateOf("00:01,07:01,13:01,22:01") }
-    var busy by remember { mutableStateOf(false) }
-    var feedback by remember { mutableStateOf("") }
 
-    suspend fun reload() {
-        guard.withLock {
-            state = manager.refresh()
-            enabled = state.enabled
-            times = state.times
-        }
-    }
-
-    fun runAction(action: suspend () -> ActionResult) {
-        if (busy) return
-        scope.launch {
-            busy = true
-            try {
-                val result = action()
-                feedback = result.message
-                reload()
-            } catch (_: Exception) {
-                feedback = "操作失败，请检查网络或系统权限"
-            } finally {
-                busy = false
-            }
-        }
-    }
-
-    DisposableEffect(owner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && !busy) scope.launch { reload() }
-        }
-        owner.lifecycle.addObserver(observer)
-        onDispose { owner.lifecycle.removeObserver(observer) }
-    }
-
-    Scaffold(topBar = { CenterAlignedTopAppBar(title = { Text("BYD Auto Sign") }) }) { insets ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(insets),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            item {
-                Text("每日自动签到", style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.SemiBold)
-                Text("纯 Android 原生执行 · 无 Root · 无常驻微信",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            item {
-                UiSection("状态") {
-                    InfoLine("签到", if (state.signedToday) "今日已完成" else state.lastResult)
-                    InfoLine("微信 Binder", state.ipc.ifBlank { "等待微信注册" })
-                    InfoLine("Hook", if (state.hookReady) "微信 ${state.hookVersion} · 就绪"
-                        else "未就绪 · 请检查 LSPosed 并启动微信")
-                    if (state.hookInfo.isNotBlank()) {
-                        Text(state.hookInfo, style = MaterialTheme.typography.bodySmall)
-                    }
-                    InfoLine("会话", when {
-                        state.sessionError.isNotBlank() -> state.sessionError
-                        state.sessionReady -> "已授权（Android Keystore 加密）"
-                        else -> "未授权 · 旧 Root 会话无法自动迁移"
-                    })
-                    OutlinedButton(enabled = !busy, onClick = { runAction { manager.reprobe() } }) {
-                        Text("重新探测微信 DEX")
-                    }
-                }
-            }
-            item {
-                UiSection("微信授权") {
-                    Text("只在手动授权时获取一次性微信 code 并兑换会话。" +
-                        " 每日签到不会拉起微信，也不会读取 Root 目录。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall)
-                    Button(
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !busy,
-                        onClick = { runAction { manager.authorize() } }
-                    ) { Text(if (state.sessionReady) "重新授权" else "初始化并授权") }
-                    Text("当前仅支持主用户微信；分身跨 User 授权尚未实现。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            item {
-                UiSection("自动调度") {
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()) {
-                        Text("启用每日签到", modifier = Modifier.weight(1f))
-                        Switch(checked = enabled, onCheckedChange = { enabled = it })
-                    }
-                    OutlinedTextField(
-                        value = times,
-                        onValueChange = { times = it },
-                        label = { Text("每日执行时间") },
-                        supportingText = { Text("本地时区 · HH:mm，用逗号分隔，最多8个时间") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    FilledTonalButton(enabled = !busy, onClick = {
-                        runAction { manager.saveSchedule(enabled, times) }
-                    }) { Text("保存调度") }
-                    InfoLine("下一次触发", state.next)
-                    if (!state.exact && Build.VERSION.SDK_INT >= 31) {
-                        Text("精确闹钟权限未授权：仍可非精确唤醒，但可能延迟。",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall)
-                        OutlinedButton(onClick = onExactPermission) { Text("授予精确闹钟权限") }
-                    }
-                    Text("AlarmManager 唤醒 + WorkManager 网络恢复重试；" +
-                        "Doze 与系统节电策略可能使触发延迟。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall)
-                }
-            }
-            item {
-                UiSection("签到任务") {
-                    Button(modifier = Modifier.fillMaxWidth(),
-                        enabled = !busy && state.sessionReady,
-                        onClick = { runAction { manager.sign() } }) { Text("立即签到") }
-                    if (busy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    if (state.lastRun.isNotBlank()) {
-                        Text("上次执行：${state.lastRun} · ${state.lastResult}",
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-            if (feedback.isNotBlank()) {
-                item { UiSection("操作结果") { Text(feedback) } }
-            }
-            item {
-                Text("需要 LSPosed 仅用于微信首次授权；Root、crond、curl 与 OpenSSL 均不再使用。" +
-                    "升级前的 Root 调度不会被新 APK 自动删除，请手动停用旧模块和任务以免重复执行。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 20.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun UiSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
-        Column(modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            content()
-        }
-    }
-}
-
-@Composable
-private fun InfoLine(label: String, value: String) {
-    Column {
-        Text(label, fontWeight = FontWeight.Medium)
-        Text(value, style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
+private fun formatDateTime(millis: Long): String =
+    if (millis <= 0L) "暂无记录" else DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
+        .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(millis))
