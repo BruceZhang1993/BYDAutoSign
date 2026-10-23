@@ -17,6 +17,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -46,11 +51,17 @@ private fun Dashboard(bridge: RootBridge) {
     var ports by remember { mutableStateOf("8088") }
     var busy by remember { mutableStateOf(false) }
     var resultText by remember { mutableStateOf("") }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // A foreground refresh and a post-action refresh must not race and leave
+    // the dashboard showing an older scheduler or Binder state.
+    val refreshMutex = remember { Mutex() }
 
     suspend fun reload() {
-        val newState = bridge.refresh()
-        state = newState
-        ports = newState.ports
+        refreshMutex.withLock {
+            val newState = bridge.refresh()
+            state = newState
+            ports = newState.ports
+        }
     }
 
     fun execute(action: suspend () -> ShellResult) {
@@ -68,7 +79,18 @@ private fun Dashboard(bridge: RootBridge) {
         }
     }
 
-    LaunchedEffect(Unit) { reload() }
+    // Android may keep the Activity and Compose tree alive while the app is
+    // backgrounded. LaunchedEffect(Unit) only ran once and missed those returns.
+    // ON_RESUME also runs on cold start, so one observer covers both paths.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && !busy) {
+                scope.launch { reload() }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Scaffold(
         topBar = { CenterAlignedTopAppBar(title = { Text("BYD Auto Sign") }) }
