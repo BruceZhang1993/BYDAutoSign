@@ -63,6 +63,10 @@ class RootBridge(private val context: Context) {
                 }
             } catch (_: Exception) { }
         }
+        if (stdin == null) {
+            // Avoid keeping a stdin pipe open for background daemon launches.
+            try { process.outputStream.close() } catch (_: Exception) { }
+        }
         if (stdin != null) {
             try {
                 // Secret never appears in process argv, URLs or shell output.
@@ -178,18 +182,36 @@ class RootBridge(private val context: Context) {
 
     /** Restart only BYDAutoSign's own Root crond, never other Root modules. */
     suspend fun restartScheduler(): ShellResult = withContext(Dispatchers.IO) {
-        val result = shell("test -f /data/adb/service.d/byd_auto_sign.sh && " +
-            "/system/bin/sh /data/adb/service.d/byd_auto_sign.sh", 30)
-        if (result.ok) {
-            ShellResult(0, "定时服务已重新启动。请刷新确认 crond 状态。")
+        val start = shell("test -f /data/adb/service.d/byd_auto_sign.sh && " +
+            "/system/bin/sh /data/adb/service.d/byd_auto_sign.sh", 18)
+        // The launcher may already have printed CRON_STARTED while the original
+        // command still holds a descriptor. Never treat that marker or a 124
+        // timeout alone as proof of failure OR success: query the live daemon.
+        val health = shell("/system/bin/sh /data/adb/service.d/byd_auto_sign.sh status", 8)
+        val isRunning = health.ok &&
+            health.output.lineSequence().any { it.trim() == "CRON_RUNNING" }
+        val hasTask = health.output.contains("/data/adb/byd_sign/byd_sign.sh")
+        if (isRunning && hasTask) {
+            ShellResult(0, if (start.exitCode == 124) {
+                "定时服务已运行且任务表有效。启动命令延迟退出（124），已通过独立状态检查确认。"
+            } else "定时服务已运行且任务表有效，请刷新状态。")
         } else {
-            val diagnostic = shell("tail -n 25 /data/adb/byd_sign/logs/scheduler.log " +
-                "2>/dev/null", 10).output.lineSequence()
+            val errors = shell("tail -n 25 /data/adb/byd_sign/logs/scheduler.log " +
+                "2>/dev/null", 8).output.lineSequence()
                 .filter { it.contains("CRON_ERROR:") || it.contains("CRON_FAILED") }
                 .takeLastSafe(5).joinToString("\n").takeLast(1200)
-            ShellResult(result.exitCode, "定时服务启动失败：" +
-                if (diagnostic.isNotBlank()) "\n" + diagnostic
-                else "\n" + result.output.takeLast(600))
+            val reason = when {
+                !health.ok && start.exitCode == 124 &&
+                    start.output.contains("CRON_STARTED") ->
+                    "脚本报告启动，但命令未正常退出，且独立状态检查失败。"
+                !health.ok -> "未检测到运行中的定时服务。"
+                !hasTask -> "定时服务已运行，但任务表没有 BYD 签到命令。"
+                else -> "定时服务状态异常。"
+            }
+            ShellResult(if (start.exitCode == 124) 124 else 1,
+                reason + if (errors.isNotBlank()) "\n" + errors else
+                    "\n启动结果：" + start.output.takeLast(500) +
+                        "\n检查结果：" + health.output.takeLast(500))
         }
     }
 
