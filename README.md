@@ -1,98 +1,46 @@
 # BYD Auto Sign
 
-一个 APK 集成 **微信小程序登录 Hook（LSPosed）** 与 **比亚迪每日自动签到（Root）**。
+纯 Android 原生自动签到应用（单 APK）。使用 LSPosed 从微信小程序**主动授权时**获取一次性 code；通过应用内 Kotlin/JCA/OkHttp 兑换 BYD session，并使用 AlarmManager + WorkManager 每日自动签到。**不需要 Root、BusyBox、crond、curl、OpenSSL 或常驻微信。**
 
-当前为 **第一阶段 / Stage 1**：优先复用已验证的 [wxcode](https://github.com/xiaojinwen/wxcode) 登录逻辑和 [byd_sign](https://github.com/xiaojinwen/byd_sign) 签到 Shell 实现，避免立即重写私有接口引发回归。
+> 状态：v0.5.0 原生重构候选版。协议的 AES/SHA-256 有原脚本对照单元测试，但实际 BYD 线上请求、不同 ROM 锁屏触发、会话跨天有效期仍须真机验收。不要把 CI 通过视为真实签到成功。
 
-## 能力
+## 运行前提
 
-- 单 APK：同时提供签到管理界面和 LSPosed 模块，无需再安装两套分离的项目。
-- 兼容已有的签到协议：微信小程序 `code` → 比亚迪 `session_id` → 签到请求。
-- 支持 Root 定时任务（每天 00:01、07:01、13:01、22:01），自动跳过今日已签到的实例。
-- 支持手动签到、主微信 Binder 授权、历史多槽位会话兼容、失败重试、签到日志。跨 Android User 的分身 Binder 授权仍待适配。
-- 复用原有邮件、Webhook 设置，以及 `/data/adb/byd_sign` 配置和历史签到状态。
-- 兼容现有 wxcode 的微信版本适配表；LSPosed 作用域为 **com.tencent.mm**。
-- Material 3 / 跟随系统深浅色的轻量管理页面。
+- Android 8.0+；需要安装并运行微信，以及 LSPosed 提供微信小程序授权 Hook。**LSPosed 是唯一仍依赖的 Hook 环境，不再调用 su**。通常需要按 LSPosed 自身要求准备相应系统环境，但 BYD Auto Sign 本身没有 Root API。
+- 启用 BYD Auto Sign 的 LSPosed 模块并勾选微信 `com.tencent.mm`；重启微信使 Hook 生效。
+- 打开本应用，点击「初始化并授权」：经 Binder 从微信拿到短期 code，在 App 内兑换 session，并通过 Android Keystore AES-GCM 安全保存。需要网络连接。仅此操作可能主动拉起微信。
+- 在「自动调度」填写本地时间，如 `07:01` 或 `00:01,07:01,13:01,22:01`；允许最多 8 个时间，保存后由 AlarmManager 调度。
+- Android 12+ 可授予「精确闹钟」特殊权限以改善触发时效；没有授权时会降级为非精确唤醒。网络重试由 WorkManager 管理；系统的 Doze 和省电策略仍可能延迟签到。
 
-## 使用说明
+## 迁移说明（从 v0.4.x Root 版本）
 
-1. 确认设备已有 **Root（Magisk / KernelSU / APatch）**、**LSPosed**，以及已登录的微信。
-2. 在 [Actions](https://github.com/BruceZhang1993/BYDAutoSign/actions) 下载已签名的原始 `BYDAutoSign-release.apk`（无需解压）并安装。仓库维护者需先配置 [Release 签名 Secrets](docs/RELEASE_SIGNING.md)。
-3. 在 LSPosed 启用 BYD Auto Sign，作用域勾选微信 `com.tencent.mm`，**强制停止后重新启动微信**，让新 Binder Hook 生效。
-4. 打开 BYD Auto Sign，授予 Root，点击 **初始化并通过 Binder 授权**。安装器从 APK 释放 Root 签到环境并注册 service.d 定时任务，然后仅在授权阶段使用微信 Binder 获取一次性 code。
-5. 确认「会话授权」区域显示已初始化会话，之后点击 **立即签到** 验证。原有 `8088,8098` 等会话槽位继续用于读取已保存的 session；当前 IPC 授权仅覆盖主微信 8088。
+**新 APK 无法直接读取旧的 Root 私有会话。** 这是 Android 沙箱权限要求，不使用 su 就不能从 `/data/adb/byd_sign` 迁移。升级后须在 App 内通过微信重新授权一次。
 
-> 跨 Android User 的微信分身 Binder 通信尚未支持。界面的端口字段仅为旧会话文件兼容标识，不表示开放本地 HTTP 端口。
+**旧 Root 签到任务并不会被 APK 自动卸载。** 如果以前安装了 byd_sign Magisk/KernelSU/APatch 模块，或残留 `/data/adb/service.d/byd_auto_sign.sh`、`/data/adb/byd_sign/cron.d/root`，请通过原有 Root 管理工具手动停用或清理，避免和新调度重复执行。新 APK 不会请求 Root 清理它们。
 
-**已有 byd_sign 用户**：运行时继续使用 `/data/adb/byd_sign`，不会覆盖现有 `code_api.conf`、`email.conf`、签到状态和日志。若旧版 byd_sign Root 模块仍启用，建议在验证新应用工作后将旧模块停用，避免双重开机调度。
+当前仅支持主 Android User 的微信 Binder 授权。旧版分身槽位的 session 不会迁移；分身/多账号将另行实现跨 User 授权。
 
-**目前的限制**：本阶段仍使用 Shell、curl、OpenSSL 兑换和签到；**已删除本机 HTTP 授权桥**，由 UID 校验的 Binder IPC 提供微信状态、DEX 探测和登录 code。**微信只在手动初始化/重新授权时需要**，日常签到使用已保存的 BYD `session_id`，不再唤醒微信；会话有效期尚未经验证，过期后必须手动重新授权。Root 定时任务在 Root 管理器支持 `/data/adb/service.d` 且 BusyBox crond 可用时独立于 APK 进程运行。前台保活、受保护 IPC 等改进详见路线图。
+## 技术架构
 
-## 构建
+- **WeChat Hook**：仅用于显式授权，DEX 动态探测 + Binder/AIDL；不暴露本地 HTTP 登录服务。
+- **NativeSignEngine**：JCA AES-128-CBC/PKCS5Padding、SHA-256 校验、OkHttp TLS 请求；服务端 session 返回后缓存，不缓存微信 code。
+- **SignStore**：AndroidKeyStore 生成 AES-GCM 本机密钥，SharedPreferences 仅保留加密密文；无 Root 目录，也不允许系统备份会话。
+- **SignScheduler**：`RTC_WAKEUP`、`setExactAndAllowWhileIdle` 或 `setAndAllowWhileIdle`；开机、升级、时区/时间/授权变化自动重建。闹钟广播入队 WorkManager（网络就绪后执行，指数退避）。
+- **SignCoordinator**：同一进程互斥，按手机本地日期幂等，今日成功后自动跳过；明确判定 session 过期时才清除。
+- **界面**：Material 3，支持系统动态色和深浅主题。
 
-需要 Android SDK 35、JDK 17、Gradle 8.10.2、网络连接。
+默认执行时间继承原版 `00:01,07:01,13:01,22:01`。目前暂无通知配置 UI 和跨 User 多账号界面。
+
+## 构建与交付
+
+需要 Android SDK 35、JDK 17；直接运行：
 
 ```bash
-bash scripts/prepare-runtime.sh  # 从固定上游版本下载并校验 curl / openssl
-bash ./gradlew :app:testDebugUnitTest :app:assembleRelease  # 需要配置 Release 签名环境变量
+bash ./gradlew :app:testDebugUnitTest :app:assembleDebug
 ```
 
-生成的已签名 APK：`app/build/outputs/apk/release/app-release.apk`（配置签名环境变量后）。**安装 APK 时无需另行下载工具**；下载只发生在构建期。构建脚本使用固定的上游 commit，并校验每个二进制的 Git blob SHA-1。
+GitHub Actions 会生成同一发布证书签名的 `BYDAutoSign-release.apk`，在 Actions → Artifacts 提供原始 APK，不会打 ZIP；参见 [签名配置](docs/RELEASE_SIGNING.md)。
 
-CI：`.github/workflows/android.yml` 在 GitHub Actions → Artifacts 上传经 `apksigner` 验证的原始 Release APK，使用 `actions/upload-artifact@v7` 和 `archive: false`，不再套 ZIP。发布包使用固定的私有签名证书；仓库管理员必须先配置 [签名 Secrets](docs/RELEASE_SIGNING.md)，否则发布步骤明确失败而不会上传未签名 APK。
+原始授权 Hook 参考 [wxcode](https://github.com/xiaojinwen/wxcode)，协议参数来自 [byd_sign](https://github.com/xiaojinwen/byd_sign)（MIT，许可保留在 `third_party/`）。BYD Auto Sign 是非官方研究项目，不代表微信或比亚迪。切勿上传 code、session_id 或未经脱敏的服务端响应。
 
-## 项目结构
-
-```text
-app/src/main/java/
-  com/brucezhang/bydautosign/   # Kotlin 管理 UI 与 Root 生命周期
-  xiaojw/hook/                  # vendored wxcode LSPosed Hook
-app/src/main/assets/
-  xposed_init                   # Xposed 入口
-  runtime/                      # 原始 Shell 签到引擎及 Root 启动脚本
-scripts/prepare-runtime.sh      # 固定 revision 二进制获取 / 校验
-docs/ROADMAP.md                 # 阶段 2 / 3 及验收标准
-docs/ARCHITECTURE.md            # 完整运行链路、迁移与安全边界
-docs/TEST_PLAN.md               # 回归清单
-```
-
-## 来源、许可和风险
-
-- 微信 Hook：[xiaojinwen/wxcode](https://github.com/xiaojinwen/wxcode)，MIT，固定源码基线 `052fd8808ec76c3b5571143b45b80ec20eed21df`。
-- 签到引擎和 curl/OpenSSL 工具：[xiaojinwen/byd_sign](https://github.com/xiaojinwen/byd_sign)，MIT，固定源码基线 `b9001bb2f3793322e0fdf7923f5969ace33e79ca`。
-- 保留上游许可于 `third_party/`；本项目自有代码采用 MIT。上游打包的第三方可执行文件可能适用各自单独的许可证，请在发布正式版本前检查随包第三方许可证。
-- 本项目为非官方学习研究工具；可能受到微信 / 比亚迪接口变更、账号使用协议及设备权限策略影响。切勿在公开 issue、日志中上传登录 code、session_id 或个人信息。
-
-## DEX 动态适配（v0.2.0）
-
-从 v0.2.0 开始支持在**微信进程内后台解析已加载 DEX**，避免每次微信更新后必须重新填写混淆类名。支持：
-
-- 优先使用当前已知、结构验证通过的内置映射（零 DEX 全盘扫描）。
-- 已知映射不匹配或未知版本：后台扫描 `JsApiLogin` 的实际调用点，并在必要时通过构造方法结构搜索回调/提交类。
-- 按微信 APK、分包及运行时 DEX 指纹缓存；只在相同指纹下复用扫描结果。
-- 探测结果必须通过反射结构与 LoginTask 字段检查；真实取码成功后才标记为**已取码验证**。
-- 应用内可以点击 **重新探测微信 DEX**，查看后台进度和可读的失败原因；HTTP 兼容桥的 `/whoami` 同步显示来源和验证状态。
-- 保留精确匹配内置配置作为低风险快速路径。
-
-目前四组混淆类、构造参数及任务提交方法可以动态发现；LoginTask 的字段映射仍要满足已知结构（代码会检查字段是否存在，不会盲目继续），微信若改变字段语义或登录协议，需要进一步更新解析器。也不保证对 Google Play 特殊变体、不可读运行时 DEX 或大规模逻辑重构自动兼容。
-
-运行阶段只分析本机微信文件，不会上传 APK 或个人数据。手动探测与版本状态查询已迁移为受 Binder 身份校验的 IPC。
-
-## 授权和签到分离（v0.3.0）
-
-- **初始化并授权**：部署 Root 任务，按需唤醒微信，通过 Binder 获取一次性 `code`，经 Root stdin 调用原有 `mina.decryptCode` 换取 BYD `session_id`。仅将 session 保存在 Root 私有目录 `/data/adb/byd_sign/sessions/<port>.session`，不保存 code。
-- **重新授权**：当前为主微信 8088 的 Binder 授权；成功后保存 session，失败不删除旧会话。跨 User 分身的重新授权需另行适配。
-- **立即签到/cron**：只读取缓存 session，然后调用 `activity/sign/signIn`。即使微信已被系统结束，签到流程也不会调用微信、获取 code 或前台唤醒。
-- 服务端明确响应 session 失效时，清除此端口 session 并提示重新授权；普通网络或业务失败时不会随意删除会话。
-- 新增端口后需手动执行重新授权；应用只展示各端口是否有凭证及授权时间，不读取/打印真实 session。
-
-**注意**：微信小程序的 code 不能长期复用。比亚迪服务端 session 的真实有效期未知，暂不支持保证授权一次永久签到，也不在自动签到任务中隐式刷新。请用真机确认该 session 能否跨天复用。如果服务端每日强制重新授权，需要单独设计受控的授权刷新机制，不能假装现有 session 永久有效。
-
-
-## Binder IPC 迁移状态（2026-10）
-
-- 微信主进程通过 AIDL 注册到模块 Broker；管理页的版本状态、DEX 探测及主动授权都经 Binder；旧 NanoHTTPD 服务器和 localhost 登录脚本已从源码移除。
-- 用户真机截图确认**主用户 Binder 注册及 Ping/Pong 可用**。目前尚没有提供“Binder 取码 → BYD session 兑换 → 签到”完整的设备级验收证据；CI 和模拟会话测试不代表真实微信登录成功。
-- 定时与立即签到仍只使用 Root 私有的 `session_id`，不连接 Binder、不唤醒微信。
-- 升级至此版本后需重启微信使 LSPosed 注入生效，并在应用内**重新部署 Root 环境**后重新授权。
-- 跨 Android User 的微信分身 IPC 尚未完成，使用旧会话只能维持到 session 过期。详见 [IPC 技术研究](docs/IPC_RESEARCH.md)。
+更多信息：[路线图](docs/ROADMAP.md) · [原生架构](docs/ARCHITECTURE.md) · [测试计划](docs/TEST_PLAN.md)。

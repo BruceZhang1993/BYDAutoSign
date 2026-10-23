@@ -1,322 +1,345 @@
 package com.brucezhang.bydautosign
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import com.brucezhang.bydautosign.ipc.IpcBrokerService
+import java.io.IOException
+import java.net.ConnectException
+import java.net.UnknownHostException
+import java.net.SocketTimeoutException
+import javax.net.ssl.SSLException
+import java.security.GeneralSecurityException
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val bridge = RootBridge(applicationContext)
+        // Restore alarms on first launch or after an app update without Root.
+        SignScheduler.reschedule(applicationContext)
+        SignScheduler.compensate(applicationContext)
+        val manager = NativeSignManager(applicationContext)
         setContent {
             val dark = isSystemInDarkTheme()
-            val colors = if (Build.VERSION.SDK_INT >= 31) {
+            val scheme = if (Build.VERSION.SDK_INT >= 31) {
                 if (dark) dynamicDarkColorScheme(this) else dynamicLightColorScheme(this)
             } else if (dark) darkColorScheme() else lightColorScheme()
-
-            MaterialTheme(colorScheme = colors) {
-                Dashboard(bridge)
+            MaterialTheme(colorScheme = scheme) {
+                Dashboard(manager, onExactPermission = {
+                    if (Build.VERSION.SDK_INT >= 31) {
+                        startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                            Uri.parse("package:$packageName")))
+                    }
+                })
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun Dashboard(bridge: RootBridge) {
-    val scope = rememberCoroutineScope()
-    var state by remember { mutableStateOf(DeviceState()) }
-    var ports by remember { mutableStateOf("8088") }
-    var busy by remember { mutableStateOf(false) }
-    var resultText by remember { mutableStateOf("") }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    // A foreground refresh and a post-action refresh must not race and leave
-    // the dashboard showing an older scheduler or Binder state.
-    val refreshMutex = remember { Mutex() }
+internal data class NativeUiState(
+    val ipc: String = "",
+    val connected: Boolean = false,
+    val hookVersion: String = "",
+    val hookReady: Boolean = false,
+    val hookInfo: String = "",
+    val sessionReady: Boolean = false,
+    val sessionError: String = "",
+    val enabled: Boolean = true,
+    val times: String = "",
+    val exact: Boolean = false,
+    val next: String = "",
+    val lastResult: String = "尚未执行",
+    val lastRun: String = "",
+    val signedToday: Boolean = false
+)
 
-    suspend fun reload() {
-        refreshMutex.withLock {
-            val newState = bridge.refresh()
-            state = newState
-            ports = newState.ports
+internal class NativeSignManager(private val context: android.content.Context) {
+    suspend fun refresh(): NativeUiState = withContext(Dispatchers.IO) {
+        val store = SignStore(context)
+        val sessionCheck = runCatching { store.session() }
+        val hook = try { JSONObject(IpcBrokerService.readHookStatus() ?: "{}") }
+            catch (_: Exception) { JSONObject() }
+        // If a prior alarm was missed while offline/asleep, avoid losing it
+        // when a foreground refresh cancels and replaces the PendingIntent.
+        SignScheduler.compensate(context)
+        val formatted = if (store.lastRun > 0) DateTimeFormatter.ofPattern("MM-dd HH:mm")
+            .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(store.lastRun)) else ""
+        NativeUiState(
+            ipc = IpcBrokerService.diagnostic(),
+            connected = IpcBrokerService.connected(),
+            hookVersion = hook.optString("version", ""),
+            hookReady = hook.optBoolean("configSupported", false),
+            hookInfo = hook.optString("probeStatus", ""),
+            sessionReady = sessionCheck.getOrNull() != null,
+            sessionError = if (sessionCheck.isFailure) "本地会话不可解密，请重新授权" else "",
+            enabled = store.enabled,
+            times = store.times,
+            exact = SignScheduler.exactAllowed(context),
+            next = SignScheduler.reschedule(context),
+            lastResult = store.lastResult,
+            lastRun = formatted,
+            signedToday = store.signedToday()
+        )
+    }
+
+    suspend fun authorize(): ActionResult = withContext(Dispatchers.IO) {
+        if (!IpcBrokerService.connected()) {
+            // An explicit user action can open WeChat, unlike a scheduled sign-in.
+            val open = context.packageManager.getLaunchIntentForPackage("com.tencent.mm")
+                ?: return@withContext ActionResult(false, "未找到微信，请安装并启动微信")
+            try { context.startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            catch (_: Exception) {
+                return@withContext ActionResult(false, "微信无法启动，请手动打开微信后返回授权")
+            }
+            repeat(15) {
+                if (IpcBrokerService.connected()) return@repeat
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        if (!IpcBrokerService.connected()) {
+            return@withContext ActionResult(false, "微信 Binder 未连接：请打开微信、确认 LSPosed 作用域后返回重试")
+        }
+        val code = IpcBrokerService.obtainCode(BydProtocol.APP_ID)
+        if (!code.successful()) {
+            return@withContext ActionResult(false, "微信授权失败（状态 ${code.status}），请检查 Hook/DEX 探测")
+        }
+        val session = try {
+            NativeSignEngine().exchangeSession(code.code)
+        } catch (e: ProtocolException) {
+            return@withContext ActionResult(false, "会话兑换失败：${e.message}")
+        } catch (_: SSLException) {
+            return@withContext ActionResult(false,
+                "会话兑换失败：HTTPS/TLS 证书或握手校验失败（TLS）。不会关闭证书验证，请检查系统时间与网络环境")
+        } catch (_: UnknownHostException) {
+            return@withContext ActionResult(false, "会话兑换失败：无法解析比亚迪服务器域名（DNS）")
+        } catch (_: SocketTimeoutException) {
+            return@withContext ActionResult(false, "会话兑换失败：连接或响应超时（Timeout）")
+        } catch (_: ConnectException) {
+            return@withContext ActionResult(false, "会话兑换失败：服务器连接失败（Connect）")
+        } catch (e: IOException) {
+            // Exception messages can embed URLs/server bodies; only expose class names.
+            return@withContext ActionResult(false,
+                "会话兑换失败：网络请求异常（${e.javaClass.simpleName}）")
+        } catch (e: Exception) {
+            return@withContext ActionResult(false,
+                "会话兑换失败：协议处理异常（${e.javaClass.simpleName}）")
+        }
+        try {
+            SignStore(context).saveSession(session)
+            if (SignStore(context).session() != session) {
+                return@withContext ActionResult(false, "会话保存后校验失败，请检查 Android Keystore")
+            }
+            ActionResult(true, "已通过 Binder 授权并安全保存 BYD 会话")
+        } catch (e: Exception) {
+            // Expose no underlying provider message: it may contain sensitive data.
+            ActionResult(false,
+                "已兑换到会话，但 Android Keystore 本地保存或读取失败（${e.javaClass.simpleName}）")
         }
     }
 
-    fun execute(action: suspend () -> ShellResult) {
+    suspend fun sign(): ActionResult = withContext(Dispatchers.IO) { SignCoordinator.sign(context) }
+
+    suspend fun saveSchedule(enabled: Boolean, times: String): ActionResult = withContext(Dispatchers.IO) {
+        val valid = ScheduleTimes.normalize(times) != null
+        if (!valid) ActionResult(false, "请输入 HH:mm，多个时间用英文逗号分隔（最多8组）")
+        else ActionResult(true, SignScheduler.configure(context, enabled, times))
+    }
+
+    suspend fun reprobe(): ActionResult = withContext(Dispatchers.IO) {
+        if (IpcBrokerService.requestProbe()) ActionResult(true, "已请求微信重新探测 DEX")
+        else ActionResult(false, "微信 Binder 尚未连接")
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val owner = LocalLifecycleOwner.current
+    val guard = remember { Mutex() }
+    var state by remember { mutableStateOf(NativeUiState()) }
+    var enabled by remember { mutableStateOf(true) }
+    var times by remember { mutableStateOf("00:01,07:01,13:01,22:01") }
+    var busy by remember { mutableStateOf(false) }
+    var feedback by remember { mutableStateOf("") }
+
+    suspend fun reload() {
+        guard.withLock {
+            state = manager.refresh()
+            enabled = state.enabled
+            times = state.times
+        }
+    }
+
+    fun runAction(action: suspend () -> ActionResult) {
         if (busy) return
         scope.launch {
             busy = true
             try {
                 val result = action()
-                resultText = (if (result.ok) "操作完成\n" else "操作失败（" + result.exitCode + "）\n") +
-                    result.output.takeLast(3500)
+                feedback = result.message
                 reload()
+            } catch (_: Exception) {
+                feedback = "操作失败，请检查网络或系统权限"
             } finally {
                 busy = false
             }
         }
     }
 
-    // Android may keep the Activity and Compose tree alive while the app is
-    // backgrounded. LaunchedEffect(Unit) only ran once and missed those returns.
-    // ON_RESUME also runs on cold start, so one observer covers both paths.
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && !busy) {
-                scope.launch { reload() }
-            }
+            if (event == Lifecycle.Event.ON_RESUME && !busy) scope.launch { reload() }
         }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
     }
 
-    Scaffold(
-        topBar = { CenterAlignedTopAppBar(title = { Text("BYD Auto Sign") }) }
-    ) { insets ->
+    Scaffold(topBar = { CenterAlignedTopAppBar(title = { Text("BYD Auto Sign") }) }) { insets ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(insets),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item {
-                Text("自动签到", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-                Text("初始化时授权微信，日常签到直接使用已保存的会话", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("每日自动签到", style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.SemiBold)
+                Text("纯 Android 原生执行 · 无 Root · 无常驻微信",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             item {
-                Section("环境状态") {
-                    HealthLine("Root 运行环境", state.rootRuntimeInstalled,
-                        if (state.rootRuntimeInstalled) "已部署到 /data/adb/byd_sign" else "需要初始化")
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    HealthLine("定时调度（BusyBox crond）", state.cronRunning, state.cronStatus)
-                    if (state.rootRuntimeInstalled && !state.cronRunning && !state.cronNeedsUpgrade) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedButton(
-                            enabled = !busy,
-                            onClick = { execute { bridge.restartScheduler() } }
-                        ) { Text("修复定时调度") }
-                        Text(
-                            "修复后若仍显示未运行，可查看 Root 私有目录中的 logs/scheduler.log。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                UiSection("状态") {
+                    InfoLine("签到", if (state.signedToday) "今日已完成" else state.lastResult)
+                    InfoLine("微信 Binder", state.ipc.ifBlank { "等待微信注册" })
+                    InfoLine("Hook", if (state.hookReady) "微信 ${state.hookVersion} · 就绪"
+                        else "未就绪 · 请检查 LSPosed 并启动微信")
+                    if (state.hookInfo.isNotBlank()) {
+                        Text(state.hookInfo, style = MaterialTheme.typography.bodySmall)
                     }
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    HealthLine("Binder IPC", state.ipcConnected, state.ipcStatus)
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    HealthLine("微信 Hook（仅授权阶段需要）", state.hookConnected && state.hookConfigured,
-                        if (!state.hookConnected) "未连接：请检查 LSPosed 作用域并启动微信"
-                        else if (!state.hookConfigured) "微信 " + state.hookVersion + "：版本映射未就绪"
-                        else "已连接 · 微信 " + state.hookVersion)
-                    if (state.hookConnected) {
-                        Spacer(Modifier.height(8.dp))
-                        val status = if (state.probeRunning) "后台动态探测中"
-                            else if (state.hookSource == "dynamic") {
-                                if (state.codeVerified) "DEX 动态映射 · 已取码验证"
-                                else "DEX 动态映射 · 结构验证通过，等待实际取码"
-                            } else if (state.hookConfigured) "内置映射 · 结构验证通过"
-                            else "当前映射尚未就绪"
-                        Text(status, style = MaterialTheme.typography.bodyMedium)
-                        if (state.probeStatus.isNotBlank()) {
-                            Text(state.probeStatus, style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        if (!state.hookConfigured && state.hookError.isNotBlank()) {
-                            Text(state.hookError, style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error)
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        OutlinedButton(enabled = !busy && !state.probeRunning,
-                            onClick = { execute { bridge.probeNow() } }) {
-                            Text("重新探测微信 DEX")
-                        }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    Text(state.diagnostic, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            enabled = !busy,
-                            onClick = {
-                                execute {
-                                    if (state.rootRuntimeInstalled) bridge.deployRuntimeOnly()
-                                    else bridge.initialize()
-                                }
-                            }
-                        ) {
-                            Text(
-                                if (state.rootRuntimeInstalled) "重新部署 Root 环境"
-                                else "初始化并通过 Binder 授权"
-                            )
-                        }
-                        OutlinedButton(
-                            enabled = !busy,
-                            onClick = { scope.launch { busy = true; try { reload() } finally { busy = false } } }
-                        ) {
-                            Text("刷新")
-                        }
-                    }
-                    if (!state.rootRuntimeInstalled) {
-                        TextButton(enabled = !busy, onClick = { execute { bridge.deployRuntimeOnly() } }) {
-                            Text("仅部署 Root 环境（不授权微信）")
-                        }
-                        Text(
-                            "初始化部署 Root 调度后，通过 Binder 获取一次性微信 code；" +
-                                "不会使用已移除的本地 HTTP 登录通道。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    InfoLine("会话", when {
+                        state.sessionError.isNotBlank() -> state.sessionError
+                        state.sessionReady -> "已授权（Android Keystore 加密）"
+                        else -> "未授权 · 旧 Root 会话无法自动迁移"
+                    })
+                    OutlinedButton(enabled = !busy, onClick = { runAction { manager.reprobe() } }) {
+                        Text("重新探测微信 DEX")
                     }
                 }
             }
             item {
-                Section("会话授权") {
-                    Text(
-                        "微信小程序 code 只在初始化/重新授权时获取，立即兑换为 BYD 会话并保存在 Root 私有目录。会话是否长期有效由服务端决定。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    if (state.sessionSummary.isNotBlank()) {
-                        SelectionContainer {
-                            Text(state.sessionSummary, style = MaterialTheme.typography.bodyMedium)
-                        }
-                    } else {
-                        Text("尚无会话信息", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedButton(
-                        enabled = state.rootRuntimeInstalled && !busy,
-                        onClick = { execute { bridge.authorize() } }
-                    ) {
-                        Text("通过 Binder 重新授权")
-                    }
-                    Text(
-                        "当前 Binder 授权针对主微信（会话槽位 8088）。" +
-                            "如果刚升级，请先更新 Root 环境；跨 User 微信分身仍需单独适配。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            item {
-                Section("签到任务") {
-                    Text("签到只使用缓存的 BYD session_id，不请求微信 code、不唤醒微信；会话失效后需重新授权。",
-                        style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(12.dp))
+                UiSection("微信授权") {
+                    Text("只在手动授权时获取一次性微信 code 并兑换会话。" +
+                        " 每日签到不会拉起微信，也不会读取 Root 目录。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall)
                     Button(
-                        onClick = { execute { bridge.signNow() } },
-                        enabled = state.rootRuntimeInstalled && !busy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("立即签到")
-                    }
-                    if (busy) {
-                        Spacer(Modifier.height(12.dp))
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    }
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !busy,
+                        onClick = { runAction { manager.authorize() } }
+                    ) { Text(if (state.sessionReady) "重新授权" else "初始化并授权") }
+                    Text("当前仅支持主用户微信；分身跨 User 授权尚未实现。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             item {
-                Section("微信实例") {
+                UiSection("自动调度") {
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()) {
+                        Text("启用每日签到", modifier = Modifier.weight(1f))
+                        Switch(checked = enabled, onCheckedChange = { enabled = it })
+                    }
                     OutlinedTextField(
-                        value = ports,
-                        onValueChange = { ports = it },
-                        label = { Text("历史会话槽位（兼容旧数据）") },
-                        supportingText = { Text("当前 Binder 授权仅支持主微信 8088；其他槽位只能使用已有会话") },
+                        value = times,
+                        onValueChange = { times = it },
+                        label = { Text("每日执行时间") },
+                        supportingText = { Text("本地时区 · HH:mm，用逗号分隔，最多8个时间") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text("此设置仅影响 Root 会话/签到槽位，不是 IPC 端口；不能自动开启分身授权。",
+                    FilledTonalButton(enabled = !busy, onClick = {
+                        runAction { manager.saveSchedule(enabled, times) }
+                    }) { Text("保存调度") }
+                    InfoLine("下一次触发", state.next)
+                    if (!state.exact && Build.VERSION.SDK_INT >= 31) {
+                        Text("精确闹钟权限未授权：仍可非精确唤醒，但可能延迟。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall)
+                        OutlinedButton(onClick = onExactPermission) { Text("授予精确闹钟权限") }
+                    }
+                    Text("AlarmManager 唤醒 + WorkManager 网络恢复重试；" +
+                        "Doze 与系统节电策略可能使触发延迟。",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(8.dp))
-                    FilledTonalButton(
-                        enabled = state.rootRuntimeInstalled && !busy,
-                        onClick = { execute { bridge.savePorts(ports) } }
-                    ) {
-                        Text("保存配置")
-                    }
-                }
-            }
-            if (resultText.isNotBlank()) {
-                item {
-                    Section("操作结果") {
-                        SelectionContainer {
-                            Text(resultText, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-            if (state.recentActivity.isNotBlank()) {
-                item {
-                    Section("最近日志") {
-                        SelectionContainer {
-                            Text(state.recentActivity, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
                 }
             }
             item {
-                Text(
-                    "需要 Root（Magisk / KernelSU / APatch）和 LSPosed 完成初次授权。会话失效前，定时签到无需微信进程运行。",
+                UiSection("签到任务") {
+                    Button(modifier = Modifier.fillMaxWidth(),
+                        enabled = !busy && state.sessionReady,
+                        onClick = { runAction { manager.sign() } }) { Text("立即签到") }
+                    if (busy) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    if (state.lastRun.isNotBlank()) {
+                        Text("上次执行：${state.lastRun} · ${state.lastResult}",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+            if (feedback.isNotBlank()) {
+                item { UiSection("操作结果") { Text(feedback) } }
+            }
+            item {
+                Text("需要 LSPosed 仅用于微信首次授权；Root、crond、curl 与 OpenSSL 均不再使用。" +
+                    "升级前的 Root 调度不会被新 APK 自动删除，请手动停用旧模块和任务以免重复执行。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 24.dp)
-                )
+                    modifier = Modifier.padding(bottom = 20.dp))
             }
         }
     }
 }
 
 @Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp)
-    ) {
-        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+private fun UiSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp)) {
+        Column(modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(6.dp))
             content()
         }
     }
 }
 
 @Composable
-private fun HealthLine(title: String, healthy: Boolean, description: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Icon(
-            if (healthy) Icons.Outlined.CheckCircle else Icons.Outlined.Info,
-            contentDescription = null,
-            tint = if (healthy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Column {
-            Text(title, fontWeight = FontWeight.Medium)
-            Text(description, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+private fun InfoLine(label: String, value: String) {
+    Column {
+        Text(label, fontWeight = FontWeight.Medium)
+        Text(value, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

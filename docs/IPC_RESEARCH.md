@@ -1,5 +1,7 @@
 # BYD Auto Sign — 安全 IPC 技术研究（2026-10-22）
 
+> **历史研究档案**：此文保留当时 Root/Shell/HTTP 方案的背景与 POC 过程。当前实际架构是无 Root 的 Kotlin 原生签到与 Android 调度，见 [当前架构](ARCHITECTURE.md) 和 [路线图](ROADMAP.md)。
+
 > 状态：**设计研究 / 待 POC 验证**。本文件不是已完成实现，也不代表通过真机验证。本次调研明确跳过 Stage 1 回归测试，不修改当前可用的 HTTP/Shell 签到链路。
 
 ## 1. 目标与现状

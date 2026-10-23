@@ -11,8 +11,8 @@ android {
         minSdk 26
         // Preserve wxcode target API during stage-1 compatibility migration.
         targetSdk 34
-        versionCode 5
-        versionName '0.4.0'
+        versionCode 6
+        versionName '0.5.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     // Use the same private signing key for every release build so Android
@@ -55,19 +55,6 @@ android {
         }
     }
 }
-tasks.register('verifySignRuntime') {
-    doLast {
-        ['arm64-v8a', 'armeabi-v7a'].each { abi ->
-            ['curl', 'openssl'].each { tool ->
-                def path = file("src/main/assets/runtime/bin/${abi}/${tool}")
-                if (!path.isFile() || path.length() == 0L) {
-                    throw new GradleException("Missing ${path}: run bash scripts/prepare-runtime.sh before building.")
-                }
-            }
-        }
-    }
-}
-tasks.named('preBuild') { dependsOn('verifySignRuntime') }
 
 dependencies {
     // Hook calls the framework LSPosed API in the injected process.
@@ -79,5 +66,9 @@ dependencies {
     implementation 'androidx.activity:activity-compose:1.9.3'
     implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.8.6'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    testImplementation 'org.json:json:20240303'
 }
