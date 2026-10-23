@@ -9,5 +9,6 @@ app/src/main/assets/runtime/bin/
 *.aab
 
 # Local Android app signing credentials
+.signing/
 *.jks
 *.keystore
