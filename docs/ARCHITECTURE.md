@@ -31,7 +31,7 @@ BYD 旧客户端协议：`AES-128-CBC/PKCS5Padding` + Base64，`SHA-256(APPSECRE
 
 ## 调度语义
 
-自定义时间按手机本地时区计算，每次仅注册下一次闹钟。Android 12+ 没有精确闹钟特权时回退 `setAndAllowWhileIdle`。闹钟广播只提交一次唯一 WorkManager 任务，签到在网络可用时运行，重试最多四次；开机/升级/时区/时间及权限变化重新注册，并在当天至少一个配置时刻已到且未签到时补偿。
+自定义时间按手机本地时区计算，每次仅注册下一次闹钟。Android 12+ 没有精确闹钟特权时回退 `setAndAllowWhileIdle`。闹钟广播只提交一次唯一 WorkManager 任务，签到在网络可用时运行，重试最多四次；开机/升级/时区/时间及权限变化重新注册，并在当天至少一个配置时刻已到且未签到时补偿。另有每 12 小时的 WorkManager 低频 watchdog：如系统在撤销精确闹钟权限时静默清除了闹钟，可延迟重建并补签（不保证准确时刻）。
 
 WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可能限制 AlarmManager，实机状态与连续运行验证不可省略。任务不请求 Binder、不唤醒微信、不刷新 session。
 

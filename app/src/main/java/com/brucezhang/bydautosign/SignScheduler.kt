@@ -11,9 +11,11 @@ import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkerParameters
 import androidx.work.WorkManager
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +57,7 @@ internal object SignScheduler {
     private const val ACTION = "com.brucezhang.bydautosign.ALARM_SIGN"
     private const val REQUEST_ID = 1077
     private const val WORK_NAME = "native-daily-sign"
+    private const val WATCHDOG_NAME = "native-alarm-watchdog"
 
     private fun intent(context: Context): PendingIntent = PendingIntent.getBroadcast(
         context, REQUEST_ID, Intent(context, SignAlarmReceiver::class.java).setAction(ACTION),
@@ -72,7 +75,17 @@ internal object SignScheduler {
         val manager = context.getSystemService(AlarmManager::class.java)
         val alarm = intent(context)
         manager.cancel(alarm)
-        if (!store.enabled) return "自动签到已关闭"
+        if (!store.enabled) {
+            WorkManager.getInstance(context).cancelUniqueWork(WATCHDOG_NAME)
+            return "自动签到已关闭"
+        }
+        // If an Android 12+ exact-alarm grant is revoked, existing alarms may
+        // be canceled silently. Periodic WorkManager is a delayed safety net.
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            WATCHDOG_NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<SignWatchdogWorker>(12, TimeUnit.HOURS).build()
+        )
         val next = ScheduleTimes.next(store.times)
         val millis = next.toInstant().toEpochMilli()
         if (exactAllowed(context)) {
@@ -141,5 +154,14 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val response = SignCoordinator.sign(applicationContext)
         if (response.retry && runAttemptCount < 4) Result.retry() else Result.success()
         // Non-retryable business/auth failure remains visible in the app.
+    }
+}
+
+/** Low-frequency safety net if the OS silently discards an exact alarm. */
+class SignWatchdogWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        SignScheduler.reschedule(applicationContext)
+        SignScheduler.compensate(applicationContext)
+        Result.success()
     }
 }
