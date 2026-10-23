@@ -36,3 +36,22 @@ su -c 'sh /data/adb/service.d/byd_auto_sign.sh'
 ## 当前架构限制
 
 BusyBox crond 是轮询时钟的传统 cron 调度器，**不是 Android AlarmManager 唤醒机制**。在设备深度待机、厂商节电策略和 Doze 下，`crond` 存活不保证能在锁屏状态准时触发。后续可增加 Root/Android 唤醒型调度或超时补偿；不应在无真机运行记录时把定时成功率标记为已验证。
+
+## 2026-10-23：定时调度显示未运行（疑似误判）
+
+设备界面可出现 **Root 环境正常、Binder 正常，但 BusyBox crond 显示未运行**。该提示只说明健康检查没有识别到本应用自己的 daemon，尚不能区分以下情况：
+
+1. daemon 真正未启动、启动失败或被系统杀掉
+2. BusyBox 进程参数被精简，旧检测器只依赖 `-c /data/adb/byd_sign/cron.d` 参数，造成**误报**
+
+当前修复：检测 `/proc/<pid>/cmdline` 时，结合 `/proc/<pid>/comm` 验证 crond/busybox 进程身份，并以 `/proc/<pid>/cwd`（BusyBox crond 启动后切到 cron spool）作为备用识别依据；BusyBox 查找覆盖 Magisk、KernelSU、APatch 和常见 BusyBox NDK 模块，同时要求实际包含 crond applet。点击修复失败时，在 App 操作结果中展示脱敏的最后几条 CRON_ERROR 记录。
+
+**设备侧确认方式**（不要把真实凭证贴出来）：
+
+```sh
+su -c 'ps -A | grep "[c]rond"'
+su -c 'cat /data/adb/byd_sign/cron.d/root'
+su -c 'tail -n 30 /data/adb/byd_sign/logs/scheduler.log'
+```
+
+如果命令一能看到本应用的 crond，但 App 显示未运行，优先排查健康检查误判；否则先看启动错误。只有 `CRON_RUNNING` 并且任务表包含 `byd_sign.sh` 时，应用才会显示绿色。进程正在运行不意味着屏幕熄灭期间能准确被唤醒。
