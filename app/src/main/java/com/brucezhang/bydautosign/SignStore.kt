@@ -91,28 +91,60 @@ internal class SignStore(context: Context) {
     }
 }
 
-internal data class ActionResult(val ok: Boolean, val message: String, val retry: Boolean = false)
+internal data class ActionResult(
+    val ok: Boolean,
+    val message: String,
+    val retry: Boolean = false,
+    val failure: SignFailureKind = SignFailureKind.NONE,
+    val skipped: Boolean = false
+)
 
 internal object SignCoordinator {
     private val lock = Any()
     private val engine by lazy { NativeSignEngine() }
 
-    fun sign(context: Context): ActionResult = synchronized(lock) {
-        val store = SignStore(context)
-        if (store.signedToday()) return@synchronized ActionResult(true, "今日已签到，自动跳过")
-        val session = try { store.session() }
-            catch (_: Exception) { return@synchronized ActionResult(false, "本地会话不可读取，请重新授权") }
-            ?: return@synchronized ActionResult(false, "尚未授权，请先通过 Binder 获取会话")
-        val outcome = engine.sign(session)
-        if (outcome.success) {
-            store.signedDate = LocalDate.now().toString()
-            store.streak = outcome.days
-        } else if (outcome.authorizationExpired) {
-            store.clearSession()
+    fun sign(context: Context, origin: SignOrigin = SignOrigin.MANUAL, attempt: Int = 1): ActionResult =
+        synchronized(lock) {
+            val store = SignStore(context)
+            // No actual sign attempt: neither history entry nor notification.
+            if (store.signedToday()) return@synchronized ActionResult(
+                true, "今日已签到，自动跳过", skipped = true
+            )
+            val date = LocalDate.now().toString()
+            val sessionResult = runCatching { store.session() }
+            val outcome = when {
+                sessionResult.isFailure -> SignOutcome(false, "本地会话不可读取，请重新授权",
+                    failure = SignFailureKind.SESSION_UNREADABLE)
+                sessionResult.getOrNull() == null -> SignOutcome(false,
+                    "尚未授权，请先通过 Binder 获取会话", failure = SignFailureKind.NO_SESSION)
+                else -> engine.sign(requireNotNull(sessionResult.getOrNull()))
+            }
+            if (outcome.success) {
+                store.signedDate = date
+                if (!outcome.alreadySigned) store.streak = outcome.days
+            } else if (outcome.authorizationExpired) {
+                store.clearSession()
+            }
+            val status = when {
+                outcome.alreadySigned -> SignRecordStatus.ALREADY_SIGNED
+                outcome.success -> SignRecordStatus.SUCCESS
+                else -> SignRecordStatus.FAILED
+            }
+            val message = when {
+                outcome.alreadySigned -> "今日已签到，无需重复执行"
+                outcome.success -> "签到成功 · 连续${outcome.days}天"
+                else -> outcome.message
+            }
+            val now = System.currentTimeMillis()
+            store.lastRun = now
+            store.lastResult = message
+            // The bounded ledger stores enum values only, never BYD response text.
+            runCatching {
+                SignHistory(context).append(SignHistoryEntry(
+                    now, origin, status, outcome.failure, attempt
+                ))
+            }
+            ActionResult(outcome.success, message, outcome.shouldRetry,
+                outcome.failure, skipped = outcome.alreadySigned)
         }
-        val message = if (outcome.success) "签到成功 · 连续${outcome.days}天" else outcome.message
-        store.lastRun = System.currentTimeMillis()
-        store.lastResult = message
-        ActionResult(outcome.success, message, outcome.shouldRetry)
-    }
 }
