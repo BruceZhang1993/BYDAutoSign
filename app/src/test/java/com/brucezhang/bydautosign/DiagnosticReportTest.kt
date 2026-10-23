@@ -27,12 +27,14 @@ class DiagnosticReportTest {
                 lastSuppressedKind = secret, crossDayAttempts = 2)
         )
         val serialized = DiagnosticReport.build(
-            state, "0.5.2", 35, "Asia/Tokyo", 123456789L)
+            state, "0.5.2", 35, "Asia/Tokyo", 123456789L,
+            notificationsAllowed = true)
         assertFalse(serialized.contains(secret))
         val json = JSONObject(serialized)
         assertEquals(1, json.getInt("schema"))
         assertEquals("0.5.2", json.getString("appVersion"))
         assertEquals(35, json.getInt("androidApi"))
+        assertTrue(json.getJSONObject("permissions").getBoolean("notificationsAllowed"))
         assertTrue(json.getJSONObject("authorization").getBoolean("sessionAvailable"))
         assertEquals(1, json.getJSONArray("history").length())
         val event = json.getJSONArray("history").getJSONObject(0)

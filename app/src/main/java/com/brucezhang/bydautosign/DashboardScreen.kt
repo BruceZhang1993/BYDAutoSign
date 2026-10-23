@@ -55,16 +55,17 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
     var busy by remember { mutableStateOf(false) }
     var notificationsAllowed by remember { mutableStateOf(SignNotifier.allowed(context)) }
 
-    var exportPayload by remember { mutableStateOf<String?>(null) }
+    // Regenerate the sanitized snapshot on result delivery: a document picker can
+    // outlive a recreated Activity, so no report payload is held in remember state.
     val exportDocument = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
-        val payload = exportPayload
-        exportPayload = null
-        if (uri != null && payload != null) {
+        if (uri != null) {
             scope.launch {
                 val saved = withContext(Dispatchers.IO) {
                     runCatching {
+                        val fresh = manager.refresh()
+                        val payload = DiagnosticReport.collect(context, fresh)
                         val out = context.contentResolver.openOutputStream(uri, "w")
                             ?: throw IOException("cannot open document")
                         out.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
@@ -399,14 +400,7 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             OutlinedButton(onClick = {
-                                runCatching { DiagnosticReport.collect(context, state) }
-                                    .onSuccess {
-                                        exportPayload = it
-                                        exportDocument.launch("byd-diagnostics-" + LocalDate.now() + ".json")
-                                    }
-                                    .onFailure {
-                                        scope.launch { snackbars.showSnackbar("无法生成诊断报告") }
-                                    }
+                                exportDocument.launch("byd-diagnostics-" + LocalDate.now() + ".json")
                             }) {
                                 Icon(Icons.Outlined.FileDownload, contentDescription = null)
                                 Spacer(Modifier.width(8.dp))

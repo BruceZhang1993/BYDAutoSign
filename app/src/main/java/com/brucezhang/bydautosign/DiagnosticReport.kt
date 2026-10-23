@@ -17,11 +17,13 @@ internal object DiagnosticReport {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName
         }.getOrNull() ?: "unknown"
         return build(state, version, Build.VERSION.SDK_INT,
-            ZoneId.systemDefault().id, System.currentTimeMillis())
+            ZoneId.systemDefault().id, System.currentTimeMillis(),
+            notificationsAllowed = SignNotifier.allowed(context))
     }
 
     fun build(
-        state: NativeUiState, appVersion: String, sdk: Int, timezone: String, generatedAt: Long
+        state: NativeUiState, appVersion: String, sdk: Int, timezone: String, generatedAt: Long,
+        notificationsAllowed: Boolean = false
     ): String {
         val trace = state.scheduleTrace
         val attempts = JSONArray()
@@ -44,7 +46,8 @@ internal object DiagnosticReport {
                 .put("binderConnected", state.connected)
                 .put("hookReady", state.hookReady))
             .put("permissions", JSONObject()
-                .put("exactAlarmGranted", state.exact))
+                .put("exactAlarmGranted", state.exact)
+                .put("notificationsAllowed", notificationsAllowed))
             .put("sign", JSONObject()
                 .put("signedToday", state.signedToday)
                 .put("historyCount", state.history.size))
