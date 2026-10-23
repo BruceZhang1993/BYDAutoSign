@@ -30,6 +30,8 @@ jobs:
         run: python3 scripts/check-hook-config.py
       - name: Verify authorization/sign-only separation
         run: python3 scripts/check-sign-session.py
+      - name: Verify cron daemon identification and scheduling recovery
+        run: python3 scripts/check-cron-scheduler.py
       - name: Run unit tests and verify APK packaging
         run: bash ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace
       - name: Inspect single APK payload (not an upload artifact)
