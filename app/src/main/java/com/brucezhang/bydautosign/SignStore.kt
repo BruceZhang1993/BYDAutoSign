@@ -5,6 +5,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
 import java.time.LocalDate
+import java.time.Instant
+import java.time.ZoneId
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -99,6 +101,12 @@ internal data class ActionResult(
     val skipped: Boolean = false
 )
 
+/** Use the response completion instant, not the request start day, for the signed marker. */
+internal object SignDatePolicy {
+    fun completedLocalDate(completedAt: Long, zone: ZoneId = ZoneId.systemDefault()): String =
+        Instant.ofEpochMilli(completedAt).atZone(zone).toLocalDate().toString()
+}
+
 internal object SignCoordinator {
     private val lock = Any()
     private val engine by lazy { NativeSignEngine() }
@@ -110,7 +118,6 @@ internal object SignCoordinator {
             if (store.signedToday()) return@synchronized ActionResult(
                 true, "今日已签到，自动跳过", skipped = true
             )
-            val date = LocalDate.now().toString()
             val sessionResult = runCatching { store.session() }
             val outcome = when {
                 sessionResult.isFailure -> SignOutcome(false, "本地会话不可读取，请重新授权",
@@ -119,8 +126,11 @@ internal object SignCoordinator {
                     "尚未授权，请先通过 Binder 获取会话", failure = SignFailureKind.NO_SESSION)
                 else -> engine.sign(requireNotNull(sessionResult.getOrNull()))
             }
+            // Capture time *after* the response. A request crossing midnight must
+            // not leave the new day unsigned and trigger a second scheduled request.
+            val now = System.currentTimeMillis()
             if (outcome.success) {
-                store.signedDate = date
+                store.signedDate = SignDatePolicy.completedLocalDate(now)
                 if (!outcome.alreadySigned) store.streak = outcome.days
             } else if (outcome.authorizationExpired) {
                 store.clearSession()
@@ -135,7 +145,6 @@ internal object SignCoordinator {
                 outcome.success -> "签到成功 · 连续${outcome.days}天"
                 else -> outcome.message
             }
-            val now = System.currentTimeMillis()
             store.lastRun = now
             store.lastResult = message
             // The bounded ledger stores enum values only, never BYD response text.
