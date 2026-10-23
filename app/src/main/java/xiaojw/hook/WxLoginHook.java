@@ -29,7 +29,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     // Hook preferences are stored privately within the WeChat user.
     private static final String SP_NAME = "wxcode_config";
     private static final String SP_KEY_VERSION_CONFIG = "version_config";
-    private static final String SP_KEY_POWER_SAVER_MODE = "power_saver_mode";
 
     private HookIpcClient ipcClient;
     // 用 CAS 保证并发登录请求串行化,避免 check-then-act 竞态
@@ -38,7 +37,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     // 多线程共享(HTTP线程/Activity主线程/Service线程),需保证可见性
     private volatile HandlerThread workerThread;
     private volatile Handler workerHandler;
-    private volatile boolean isForegroundServiceRunning = false;
     private Application wechatApplication;
 
     // 版本配置JSON（内置默认配置）
@@ -167,12 +165,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     private void loadSavedConfigs(Context context) {
         this.appContext = context;
         if (context instanceof Application) this.wechatApplication = (Application) context;
-        // 读取持久化的保活模式
-        try {
-            KeepAliveService.powerSaverMode = appContext.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
-                    .getBoolean(SP_KEY_POWER_SAVER_MODE, false);
-            XposedBridge.log(TAG + " 保活模式: " + (KeepAliveService.powerSaverMode ? "省电模式" : "性能模式"));
-        } catch (Exception ignored) {}
         // 记录内置默认配置原文
         defaultConfigJson = jsonString;
         // 读取持久化的版本配置，与内置默认配置合并
@@ -193,45 +185,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
         } catch (Exception e) {
             XposedBridge.log(TAG + " 加载持久化版本配置失败[" + e.getClass().getSimpleName() + "]:" + e.getMessage());
         }
-    }
-
-    /**
-     * 启动后台线程和前台保活 Service（HTTP server 启动后调用）
-     */
-    private void startKeepAlive() {
-        startWorkerThread();
-        startForegroundService();
-    }
-
-    /**
-     * 前台保活模式：真正启动一个前台 Service，将进程优先级提升到前台，
-     * 从而绕过系统对后台应用的网络限流/Doze延迟，并规避"后台启动Activity被拦截"的问题。
-     */
-    private void startForegroundService() {
-        if (isForegroundServiceRunning) return;
-        try {
-            Intent intent = new Intent(appContext, KeepAliveService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appContext.startForegroundService(intent);
-            } else {
-                appContext.startService(intent);
-            }
-            isForegroundServiceRunning = true;
-            XposedBridge.log(TAG + " 前台保活Service已启动（进程优先级提升至前台）");
-        } catch (Exception e) {
-            XposedBridge.log(TAG + " 前台Service启动失败[" + e.getClass().getSimpleName() + "]:" + e.getMessage());
-            isForegroundServiceRunning = false;
-        }
-    }
-
-    /**
-     * 停止前台保活 Service（WakeLock 由 Service.onDestroy 自行释放）
-     */
-    private void stopForegroundService() {
-        try {
-            appContext.stopService(new Intent(appContext, KeepAliveService.class));
-        } catch (Exception ignored) {}
-        isForegroundServiceRunning = false;
     }
 
     /**
@@ -257,47 +210,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " 保存版本配置失败: " + e.getMessage());
         }
     }
-
-    /**
-     * 切换保活模式：更新标志 + 异步重启 KeepAliveService 以应用新模式。
-     * 用 Handler.postDelayed 替代 Thread.sleep，更可靠且不阻塞调用线程。
-     */
-    private void switchPowerMode(boolean toPowerSaver) {
-        if (KeepAliveService.powerSaverMode == toPowerSaver) return;
-        KeepAliveService.powerSaverMode = toPowerSaver;
-        // 持久化到 SharedPreferences，确保微信重启后模式选择不丢失
-        try {
-            appContext.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
-                    .edit().putBoolean(SP_KEY_POWER_SAVER_MODE, toPowerSaver).apply();
-        } catch (Exception ignored) {}
-        XposedBridge.log(TAG + " 切换保活模式: " + (toPowerSaver ? "省电模式" : "性能模式"));
-        stopForegroundService();
-        isForegroundServiceRunning = false;
-        // 用 Handler 延迟启动替代 Thread.sleep，避免阻塞 HTTP 线程
-        Handler mainHandler = new Handler(Looper.getMainLooper());
-        mainHandler.postDelayed(this::startForegroundService, 200);
-    }
-
-    /**
-     * 后台登录时确保前台保活 Service 已拉起，避免接口请求被系统限流卡住。
-     */
-    private void ensureForegroundForBackground() {
-        if (!isForegroundServiceRunning) {
-            startForegroundService();
-        }
-    }
-
-    /**
-     * 等待前台 Service 真正 startForeground 完成（startForegroundService 是异步的）。
-     * 只有真正就绪（fgServiceActive=true）后，Android 10 才允许从后台启动 Activity。
-     */
-    private void waitForForegroundService(long timeoutMs) {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (!KeepAliveService.fgServiceActive && System.currentTimeMillis() < deadline) {
-            try { Thread.sleep(50); } catch (InterruptedException ignored) { break; }
-        }
-    }
-
 
     /**
      * 启动后台轮询子线程
@@ -432,7 +344,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
         final String[] res = {null};
         try {
             final long timeoutMs = 30000;
-            XposedBridge.log(TAG + " doLogin 前台Service运行=" + isForegroundServiceRunning + " 超时=" + timeoutMs + "ms");
             Class<?> LoginTaskCls = requireMappedClass("LoginTask",
                     "com.tencent.mm.plugin.appbrand.jsapi.auth.JsApiLogin$LoginTask", classLoader);
             Class<?> h2Cls = requireMappedClass("a1", qualifyAuthClass(this.a1), classLoader);
@@ -441,9 +352,6 @@ public class WxLoginHook implements IXposedHookLoadPackage {
             Class<?> j1Cls = requireMappedClass("j1", this.j1, classLoader);
             XposedBridge.log(TAG + " a1=" + WECHAT_PACKAGE_PREFIX + "." + this.a1 + " a7=" + WECHAT_PACKAGE_PREFIX + "." + this.a7);
             XposedBridge.log(TAG + " 发起登录 appId=" + str);
-            // 后台时确保前台 Service 就绪，避免网络请求被 Doze 限流
-            ensureForegroundForBackground();
-            waitForForegroundService(1000);
             Object loginTask = XposedHelpers.newInstance(LoginTaskCls);
             setField(loginTask, "o", "login");
             setField(loginTask, "p", str);

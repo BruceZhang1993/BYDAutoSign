@@ -7,9 +7,7 @@
     <!-- Android 12+ special access: user can deny; inexact wakeup is the fallback. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Existing wxcode foreground service is used only for explicit authorization. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:label="@string/app_name"
@@ -28,9 +26,6 @@
             </intent-filter>
         </activity>
         <service android:name=".ipc.IpcBrokerService" android:exported="true" />
-        <service android:name="xiaojw.hook.KeepAliveService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
         <receiver android:name=".SignAlarmReceiver" android:exported="false" />
         <receiver android:name=".SignRescheduleReceiver" android:exported="false">

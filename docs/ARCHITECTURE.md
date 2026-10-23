@@ -21,7 +21,7 @@
 
 Android 应用不再调用 `su` / ProcessBuilder，不再复制到 `/data/adb`，不启动 `service.d`、BusyBox crond，不捆绑或运行 curl/OpenSSL。旧 Root 目录由用户通过旧 Root 管理工具手动停用或移除；普通 APK 无法合法代为访问或删除。
 
-注意：LSPosed Hook 仍然是首次微信登录授权的外部前提。所谓“无 Root”指本应用运行链不调用 Root/Root 脚本，并不表示所有 LSPosed 安装方案都不需要系统级权限。
+注意：LSPosed Hook 仍然是首次微信登录授权的外部前提。旧 wxcode 的前台常驻保活 Service 已移除；只保留短时授权工作线程。所谓“无 Root”指本应用运行链不调用 Root/Root 脚本，并不表示所有 LSPosed 安装方案都不需要系统级权限。
 
 ## 协议与安全
 
