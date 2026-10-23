@@ -122,37 +122,45 @@ internal class ScheduleTelemetry(context: Context) {
     )
 }
 
+/** Pure policy to keep notification deduplication independently testable. */
+internal object SignNotificationPolicy {
+    fun dailyKey(result: ActionResult, date: LocalDate): String? {
+        if (result.skipped) return null
+        return "$date:${if (result.ok) "SUCCESS" else result.failure.name}"
+    }
+}
+
 /** One notification per day and outcome category; skipped/already-signed never alerts. */
 internal class SignNotifier(private val context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("byd_sign_notifications", Context.MODE_PRIVATE)
 
     fun notifyResult(result: ActionResult) {
-        if (result.skipped || !allowed(context)) return
-        val kind = if (result.ok) "SUCCESS" else result.failure.name
-        val key = "${LocalDate.now()}:$kind"
+        val key = SignNotificationPolicy.dailyKey(result, LocalDate.now()) ?: return
+        if (!allowed(context)) return
         synchronized(monitor) {
             if (prefs.getString("last_key", "") == key) return
-            val manager = context.getSystemService(NotificationManager::class.java)
-            val channelId = "byd_sign_result"
-            manager.createNotificationChannel(NotificationChannel(
-                channelId, "签到结果", NotificationManager.IMPORTANCE_DEFAULT
-            ))
-            val launch = PendingIntent.getActivity(context, 0,
-                Intent(context, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            val notification = Notification.Builder(context, channelId)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentTitle(if (result.ok) "比亚迪签到成功" else "比亚迪签到失败")
-                .setContentText(if (result.ok) "今日签到已完成" else result.message.take(80))
-                .setAutoCancel(true)
-                .setContentIntent(launch)
-                .setCategory(Notification.CATEGORY_STATUS)
-                .build()
             try {
+                val manager = context.getSystemService(NotificationManager::class.java)
+                val channelId = "byd_sign_result"
+                manager.createNotificationChannel(NotificationChannel(
+                    channelId, "签到结果", NotificationManager.IMPORTANCE_DEFAULT
+                ))
+                val launch = PendingIntent.getActivity(context, 0,
+                    Intent(context, MainActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                val notification = Notification.Builder(context, channelId)
+                    .setSmallIcon(android.R.drawable.stat_notify_sync)
+                    .setContentTitle(if (result.ok) "比亚迪签到成功" else "比亚迪签到失败")
+                    .setContentText(if (result.ok) "今日签到已完成" else result.message.take(80))
+                    .setAutoCancel(true)
+                    .setContentIntent(launch)
+                    .setCategory(Notification.CATEGORY_STATUS)
+                    .build()
                 manager.notify(NOTIFICATION_ID, notification)
                 prefs.edit().putString("last_key", key).apply()
-            } catch (_: SecurityException) {
-                // The user can revoke notification permission between check and notify.
+            } catch (_: RuntimeException) {
+                // Notifications are best-effort: permission/system errors must
+                // never convert a successful sign-in into a failed Worker/UI job.
             }
         }
     }
