@@ -206,17 +206,33 @@ is_own_crond() {
 }
 
 own_crond_pids() {
-    local file pid command_line cwd state comm
-    for file in /proc/[0-9]*/cmdline; do
-        [ -r "$file" ] || continue
-        pid=${file#/proc/}
-        pid=${pid%/cmdline}
-        state=$(sed -n 's/^State:[[:space:]]*\([A-Z]\).*/\1/p' "/proc/$pid/status" 2>/dev/null)
-        [ "$state" = Z ] && continue
-        command_line=$(tr '\000' ' ' < "$file" 2>/dev/null) || continue
-        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || cwd=""
-        comm=$(cat "/proc/$pid/comm" 2>/dev/null) || comm=""
+    local proc pid comm command_line cwd
+    # First filter with the shell builtin read: no sed/tr/readlink/cat
+    # subprocess is spawned for unrelated Android processes. On a device
+    # with hundreds of /proc entries, the old scanner exceeded the 8s
+    # health-check timeout and made both repair and status report 124.
+    for proc in /proc/[0-9]*; do
+        [ -d "$proc" ] || continue
+        pid=${proc#/proc/}
+        # Read /proc/<pid>/comm using the shell builtin. A kernel thread or
+        # unrelated process should be discarded without spawning a process.
+        comm=""
+        IFS= read -r comm < "$proc/comm" 2>/dev/null || continue
+        case "$comm" in
+            crond|busybox) ;;
+            *) continue ;;
+        esac
+        [ -r "$proc/cmdline" ] || continue
+        command_line=$(tr '\000' ' ' < "$proc/cmdline" 2>/dev/null) || continue
+        [ -n "$command_line" ] || continue
+        cwd=$(readlink "$proc/cwd" 2>/dev/null) || cwd=""
         if is_own_crond "$command_line" "$cwd" "$comm"; then
+            # Exclude zombies; this invokes a single process per matching
+            # candidate rather than per Android process.
+            [ -r "$proc/status" ] || continue
+            if grep -q '^State:[[:space:]]*Z' "$proc/status" 2>/dev/null; then
+                continue
+            fi
             printf '%s\n' "$pid"
         fi
     done
