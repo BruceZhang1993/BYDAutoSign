@@ -271,7 +271,7 @@ restart_crond() {
     # Find a replacement before terminating any existing owned scheduler.
     stop_crond
     sleep 1
-    "$BUSYBOX" crond -b -c "$WORK_DIR/cron.d" -L "$LOG_DIR/cron.log" 2>>"$LOG_DIR/scheduler.log" || status=$?
+    "$BUSYBOX" crond -b -c "$WORK_DIR/cron.d" -L "$LOG_DIR/cron.log" </dev/null >/dev/null 2>>"$LOG_DIR/scheduler.log" || status=$?
     if [ "$status" -ne 0 ]; then
         echo "CRON_ERROR: crond launch failed (exit $status)" >&2
         return "$status"
