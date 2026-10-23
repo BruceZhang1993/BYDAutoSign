@@ -60,6 +60,52 @@ internal object BydProtocol {
             JSONObject.quote(session) + ",\"app_version\":\"460\",\"app_client\":\"mina\"}"
 }
 
+internal object ResponseFields {
+    /**
+     * The original Shell parser searched for field names at ANY JSON depth,
+     * whereas a top-level JSONObject.optString() silently missed nested data.
+     * Restrict traversal depth and node count for untrusted server responses.
+     */
+    fun lookup(root: Any, field: String): Any? {
+        var remaining = 128
+        fun find(value: Any?, depth: Int): Any? {
+            if (value == null || depth > 8 || --remaining < 0) return null
+            when (value) {
+                is JSONObject -> {
+                    if (value.has(field) && !value.isNull(field)) return value.opt(field)
+                    val names = value.keys()
+                    while (names.hasNext()) {
+                        val nested = find(value.opt(names.next()), depth + 1)
+                        if (nested != null) return nested
+                    }
+                }
+                is org.json.JSONArray -> {
+                    for (i in 0 until minOf(value.length(), 128)) {
+                        val nested = find(value.opt(i), depth + 1)
+                        if (nested != null) return nested
+                    }
+                }
+            }
+            return null
+        }
+        return find(root, 0)
+    }
+
+    fun text(root: Any, field: String): String? {
+        val value = lookup(root, field)
+        return if (value is String) value else null
+    }
+
+    fun int(root: Any, field: String): Int? {
+        val value = lookup(root, field)
+        return when (value) {
+            is Number -> value.toInt()
+            is String -> value.toIntOrNull()
+            else -> null
+        }
+    }
+}
+
 internal class ProtocolException(message: String) : IOException(message)
 internal class AuthenticationExpired : IOException("会话已失效，请重新授权")
 
@@ -80,15 +126,17 @@ internal class NativeSignEngine(
         .connectTimeout(15, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS)
         .followRedirects(false)
-        .build()
+        .build(),
+    // Test override only. Production always uses the fixed HTTPS BYD endpoint.
+    private val baseUrl: String = BydProtocol.BASE_URL
 ) {
     // Do not log or include the one-time WeChat code in any exception message.
     fun exchangeSession(code: String): String {
-        if (code.length !in 6..4096 || !code.all { it.isLetterOrDigit() || it in "_+./=:%-" }) {
+        if (code.length !in 6..4096 || !code.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "_+./=:%-" }) {
             throw ProtocolException("微信授权凭证格式无效")
         }
         val json = request("mina.decryptCode", BydProtocol.loginPayload(code))
-        val session = json.optString("session_id")
+        val session = ResponseFields.text(json, "session_id").orEmpty()
         if (session.isBlank() || session.length > 8192) {
             throw ProtocolException("服务器没有返回有效会话")
         }
@@ -99,12 +147,12 @@ internal class NativeSignEngine(
         if (session.isBlank()) return SignOutcome(false, "需要重新授权")
         return try {
             val json = request("activity/sign/signIn", BydProtocol.signPayload(session))
-            if (json.optInt("ret", -1) == 200) {
-                SignOutcome(true, "签到成功", json.optInt("durationDays", 0).coerceAtLeast(0))
+            if (ResponseFields.int(json, "ret") == 200) {
+                SignOutcome(true, "签到成功", (ResponseFields.int(json, "durationDays") ?: 0).coerceAtLeast(0))
             } else {
                 // Only explicit server expiry indicators cause credential invalidation.
-                val safeText = listOf(json.optString("msg"), json.optString("message"))
-                    .joinToString(" ")
+                val safeText = listOfNotNull(ResponseFields.text(json, "msg"),
+                    ResponseFields.text(json, "message")).joinToString(" ")
                 val expired = Regex(
                     "session[_ ]?id.{0,32}(失效|过期|invalid|expired)|未登录|登录已过期|session expired|invalid session",
                     RegexOption.IGNORE_CASE
@@ -131,7 +179,7 @@ internal class NativeSignEngine(
             else -> throw ProtocolException("不支持的接口")
         }
         val body = BydProtocol.encrypt(plainBody)
-        val req = Request.Builder().url(BydProtocol.BASE_URL + path)
+        val req = Request.Builder().url(baseUrl + path)
             .post(body.toRequestBody("application/json".toMediaType()))
             .header("Content-Type", "application/json")
             .header("X-Clienttraceid", "mina-" + UUID.randomUUID().toString())

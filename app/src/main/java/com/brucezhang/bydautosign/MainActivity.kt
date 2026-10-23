@@ -27,6 +27,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import com.brucezhang.bydautosign.ipc.IpcBrokerService
+import java.io.IOException
+import java.net.ConnectException
+import java.net.UnknownHostException
+import java.net.SocketTimeoutException
+import javax.net.ssl.SSLException
+import java.security.GeneralSecurityException
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -122,12 +128,37 @@ internal class NativeSignManager(private val context: android.content.Context) {
         if (!code.successful()) {
             return@withContext ActionResult(false, "微信授权失败（状态 ${code.status}），请检查 Hook/DEX 探测")
         }
+        val session = try {
+            NativeSignEngine().exchangeSession(code.code)
+        } catch (e: ProtocolException) {
+            return@withContext ActionResult(false, "会话兑换失败：${e.message}")
+        } catch (_: SSLException) {
+            return@withContext ActionResult(false,
+                "会话兑换失败：HTTPS/TLS 证书或握手校验失败（TLS）。不会关闭证书验证，请检查系统时间与网络环境")
+        } catch (_: UnknownHostException) {
+            return@withContext ActionResult(false, "会话兑换失败：无法解析比亚迪服务器域名（DNS）")
+        } catch (_: SocketTimeoutException) {
+            return@withContext ActionResult(false, "会话兑换失败：连接或响应超时（Timeout）")
+        } catch (_: ConnectException) {
+            return@withContext ActionResult(false, "会话兑换失败：服务器连接失败（Connect）")
+        } catch (e: IOException) {
+            // Exception messages can embed URLs/server bodies; only expose class names.
+            return@withContext ActionResult(false,
+                "会话兑换失败：网络请求异常（${e.javaClass.simpleName}）")
+        } catch (e: Exception) {
+            return@withContext ActionResult(false,
+                "会话兑换失败：协议处理异常（${e.javaClass.simpleName}）")
+        }
         try {
-            val session = NativeSignEngine().exchangeSession(code.code)
             SignStore(context).saveSession(session)
+            if (SignStore(context).session() != session) {
+                return@withContext ActionResult(false, "会话保存后校验失败，请检查 Android Keystore")
+            }
             ActionResult(true, "已通过 Binder 授权并安全保存 BYD 会话")
-        } catch (_: Exception) {
-            ActionResult(false, "会话兑换或安全保存失败，旧会话未被主动清理；请检查网络连接")
+        } catch (e: Exception) {
+            // Expose no underlying provider message: it may contain sensitive data.
+            ActionResult(false,
+                "已兑换到会话，但 Android Keystore 本地保存或读取失败（${e.javaClass.simpleName}）")
         }
     }
 
