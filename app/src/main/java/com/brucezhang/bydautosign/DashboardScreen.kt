@@ -168,7 +168,7 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Icon(
                                     if (state.sessionReady) Icons.Outlined.VerifiedUser
-                                        else Icons.Outlined.LockOutline,
+                                        else Icons.Outlined.Lock,
                                     contentDescription = null,
                                     tint = if (state.sessionReady) MaterialTheme.colorScheme.primary
                                         else MaterialTheme.colorScheme.error
