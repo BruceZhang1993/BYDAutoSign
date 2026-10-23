@@ -180,7 +180,7 @@ internal class NativeSignEngine(
         }
         val body = BydProtocol.encrypt(plainBody)
         val req = Request.Builder().url(baseUrl + path)
-            .post(body.toRequestBody("application/json".toMediaType()))
+            .post(body.toByteArray(Charsets.UTF_8).toRequestBody("application/json".toMediaType()))
             .header("Content-Type", "application/json")
             .header("X-Clienttraceid", "mina-" + UUID.randomUUID().toString())
             .header("Nonce", nonce)
