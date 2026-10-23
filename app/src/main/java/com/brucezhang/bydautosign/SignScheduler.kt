@@ -89,10 +89,12 @@ internal object SignScheduler {
         )
         val next = ScheduleTimes.next(store.times)
         val millis = next.toInstant().toEpochMilli()
-        if (exactAllowed(context)) {
+        var scheduledExact = exactAllowed(context)
+        if (scheduledExact) {
             try {
                 manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
             } catch (_: SecurityException) {
+                scheduledExact = false
                 manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
             }
         } else {
@@ -100,9 +102,9 @@ internal object SignScheduler {
             // This still wakes in Doze, but delivery can be substantially delayed.
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
         }
-        ScheduleTelemetry(context).planned(millis, exactAllowed(context))
+        ScheduleTelemetry(context).planned(millis, scheduledExact)
         return "下次 ${next.format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))}" +
-            if (exactAllowed(context)) " · 精确唤醒" else " · 非精确（需授权闹钟）"
+            if (scheduledExact) " · 精确唤醒" else " · 非精确（需授权闹钟）"
     }
 
     fun enqueue(context: Context) {
@@ -121,6 +123,7 @@ internal object SignScheduler {
         val store = SignStore(context)
         if (store.enabled && !store.signedToday() &&
             !ZonedDateTime.now().isBefore(ScheduleTimes.firstToday(store.times))) {
+            ScheduleTelemetry(context).compensation()
             enqueue(context)
         }
     }
