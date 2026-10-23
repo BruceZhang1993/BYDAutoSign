@@ -171,7 +171,10 @@ internal class NativeSignManager(private val context: android.content.Context) {
     suspend fun saveSchedule(enabled: Boolean, times: String): ActionResult = withContext(Dispatchers.IO) {
         val valid = ScheduleTimes.normalize(times) != null
         if (!valid) ActionResult(false, "请输入 HH:mm，多个时间用英文逗号分隔（最多8组）")
-        else ActionResult(true, SignScheduler.configure(context, enabled, times))
+        else {
+            val result = SignScheduler.configure(context, enabled, times)
+            ActionResult(!result.startsWith("设置定时失败"), result)
+        }
     }
 
     suspend fun reprobe(): ActionResult = withContext(Dispatchers.IO) {

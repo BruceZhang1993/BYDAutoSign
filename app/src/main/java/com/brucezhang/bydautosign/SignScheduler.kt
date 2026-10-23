@@ -94,17 +94,22 @@ internal object SignScheduler {
         val next = ScheduleTimes.next(store.times)
         val millis = next.toInstant().toEpochMilli()
         var scheduledExact = exactAllowed(context)
-        if (scheduledExact) {
-            try {
-                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
-            } catch (_: SecurityException) {
-                scheduledExact = false
+        val scheduled = runCatching {
+            if (scheduledExact) {
+                try {
+                    manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
+                } catch (_: SecurityException) {
+                    scheduledExact = false
+                    manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
+                }
+            } else {
+                // Revoked exact access means a non-exact wake, possibly substantially delayed.
                 manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
             }
-        } else {
-            // Android 12+/14+: the user may have denied exact-alarm special access.
-            // This still wakes in Doze, but delivery can be substantially delayed.
-            manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
+        }
+        if (scheduled.isFailure) {
+            ScheduleTelemetry(context).planned(0, false)
+            return "设置定时失败，请检查系统闹钟权限"
         }
         ScheduleTelemetry(context).planned(millis, scheduledExact)
         return "下次 ${next.format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))}" +
@@ -166,8 +171,9 @@ internal object SignScheduler {
                 else -> "rearmed"
             }
             runCatching {
-                reschedule(context)
-                telemetry.recovered(source.name, detail)
+                val result = reschedule(context)
+                if (result.startsWith("设置定时失败")) telemetry.recoveryFailed(source.name)
+                else telemetry.recovered(source.name, detail)
             }.onFailure {
                 telemetry.recoveryFailed(source.name)
             }

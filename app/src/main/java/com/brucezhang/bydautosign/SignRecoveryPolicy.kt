@@ -1,6 +1,5 @@
 package com.brucezhang.bydautosign
 
-import java.time.Instant
 import java.time.ZoneId
 
 /** Pure decision logic: no Android service or time lookup required by unit tests. */

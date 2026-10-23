@@ -236,6 +236,9 @@ internal class NativeSignEngine(
             .build()
         client.newCall(req).execute().use { response ->
             if (!response.isSuccessful) {
+                if (response.code == 408)
+                    throw ProtocolException("请求超时（HTTP 408）",
+                        SignFailureKind.TIMEOUT, retryable = true)
                 if (response.code == 429 || response.code in 500..599)
                     throw ProtocolException("服务端暂不可用（HTTP ${response.code}）",
                         SignFailureKind.SERVER, retryable = true)
