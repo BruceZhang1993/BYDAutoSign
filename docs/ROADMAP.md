@@ -6,7 +6,8 @@
 - [x] 单 APK 集成 wxcode Hook、动态 DEX 探测与 Binder 受限授权
 - [x] 主 User 0 Binder 注册 Ping/Pong
 - [x] 删除无鉴权 localhost HTTP Hook 桥接
-- [ ] 主微信取码 → BYD session → 成功签到的最新版真机验收
+- [x] 用户反馈：主微信 Binder 取码 → Kotlin 原生 BYD session 兑换/加密保存的真机验收（2026-10-24）
+- [ ] 使用新 session 立即签到并获取真实成功响应的真机验收
 - [ ] 多微信版本动态探测的真实取码验证
 
 ## Stage 2：无 Root 原生签到与自动调度
@@ -17,7 +18,8 @@
 - [x] 进程内互斥、当日幂等与简单结果持久化
 - [x] 去除打包 Root runtime、curl/OpenSSL、旧定时安装流程
 - [x] AES/OpenSSL 对照向量与 SHA256 协议单测
-- [ ] HTTPS 在线接口与真实设备成功/失败响应契约验证
+- [x] 用户反馈：HTTPS 原生会话兑换与本地保存真机成功（2026-10-24）
+- [ ] 签到接口的真实成功/失败响应及异常场景契约验证
 - [ ] 不同 ROM 的锁屏、Doze、重启、权限撤销、网络恢复设备验收
 - [ ] 更完善的错误分级/账号隔离及脱敏通知体系
 
