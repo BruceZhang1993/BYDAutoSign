@@ -176,3 +176,7 @@ internal class NativeSignManager(private val context: android.content.Context) {
     }
 }
 
+
+private fun formatDateTime(millis: Long): String =
+    if (millis <= 0L) "暂无记录" else DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
+        .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(millis))
