@@ -35,6 +35,41 @@ class SignClassificationTest {
             SignNotificationPolicy.dailyKey(success, date.plusDays(1)))
     }
 
+    @Test fun successfulRequestCrossingMidnightUsesCompletionDay() {
+        val zone = java.time.ZoneId.of("Asia/Tokyo")
+        val requestStarted = java.time.ZonedDateTime.of(
+            2026, 10, 23, 23, 59, 59, 0, zone).toInstant().toEpochMilli()
+        val responseCompleted = java.time.ZonedDateTime.of(
+            2026, 10, 24, 0, 0, 2, 0, zone).toInstant().toEpochMilli()
+        assertEquals("2026-10-23", SignDatePolicy.completedLocalDate(requestStarted, zone))
+        assertEquals("2026-10-24", SignDatePolicy.completedLocalDate(responseCompleted, zone))
+        // The successful coordinator passes the completion timestamp, not requestStarted.
+    }
+
+    @Test fun distinctFailureCategoriesCannotCauseDuplicateNotificationInOneDay() {
+        val today = LocalDate.of(2026, 10, 24)
+        val network = ActionResult(false, "网络故障", failure = SignFailureKind.NETWORK)
+        val client = ActionResult(false, "请求被拒绝", failure = SignFailureKind.HTTP_CLIENT)
+        val networkKey = SignNotificationPolicy.dailyKey(network, today)
+        val clientKey = SignNotificationPolicy.dailyKey(client, today)
+        var sent = SignNotificationPolicy.keysForToday("", today, emptySet())
+        assertTrue(SignNotificationPolicy.shouldNotify(networkKey, sent))
+        sent = sent + requireNotNull(networkKey)
+        assertTrue(SignNotificationPolicy.shouldNotify(clientKey, sent))
+        sent = sent + requireNotNull(clientKey)
+        // NETWORK -> HTTP_CLIENT -> NETWORK must not alert NETWORK again.
+        assertFalse(SignNotificationPolicy.shouldNotify(networkKey, sent))
+        assertEquals(setOf("2026-10-24:NETWORK", "2026-10-24:HTTP_CLIENT"), sent)
+        // A new local day resets the set even if it was persisted from yesterday.
+        val tomorrow = today.plusDays(1)
+        val nextDay = SignNotificationPolicy.keysForToday(today.toString(), tomorrow, sent)
+        assertTrue(nextDay.isEmpty())
+        assertTrue(SignNotificationPolicy.shouldNotify(
+            SignNotificationPolicy.dailyKey(network, tomorrow), nextDay))
+        // Repeated notifications for the same category on the same day stay skipped.
+        assertEquals(sent, SignNotificationPolicy.keysForToday(today.toString(), today, sent))
+    }
+
     @Test fun successHasNoFailure() = withResponse(json("""{"ret":200,"durationDays":9}""")) {
         assertTrue(it.success)
         assertEquals(SignFailureKind.NONE, it.failure)
