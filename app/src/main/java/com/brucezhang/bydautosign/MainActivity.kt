@@ -26,8 +26,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Restore alarms on first launch or after an app update without Root.
-        SignScheduler.reschedule(applicationContext)
-        SignScheduler.compensate(applicationContext)
+        SignScheduler.recover(applicationContext, ScheduleRecoverySource.APP_START, force = true)
         val manager = NativeSignManager(applicationContext)
         setContent {
             val dark = isSystemInDarkTheme()
@@ -73,7 +72,7 @@ internal class NativeSignManager(private val context: android.content.Context) {
             catch (_: Exception) { JSONObject() }
         // If a prior alarm was missed while offline/asleep, avoid losing it
         // when a foreground refresh cancels and replaces the PendingIntent.
-        SignScheduler.compensate(context)
+        SignScheduler.recover(context, ScheduleRecoverySource.FOREGROUND)
         val formatted = if (store.lastRun > 0) DateTimeFormatter.ofPattern("MM-dd HH:mm")
             .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(store.lastRun)) else ""
         val telemetry = ScheduleTelemetry(context).snapshot()
@@ -90,7 +89,12 @@ internal class NativeSignManager(private val context: android.content.Context) {
             hookReady = hook.optBoolean("configSupported", false),
             hookInfo = hook.optString("probeStatus", ""),
             sessionReady = sessionCheck.getOrNull() != null,
-            sessionError = if (sessionCheck.isFailure) "本地会话不可解密，请重新授权" else "",
+            sessionError = when {
+                sessionCheck.isFailure -> "本地会话不可解密，请重新授权"
+                store.automaticBlockKind() == SignFailureKind.AUTH_EXPIRED ->
+                    "会话已过期，自动签到暂停；请重新授权"
+                else -> ""
+            },
             enabled = store.enabled,
             times = store.times,
             exact = SignScheduler.exactAllowed(context),

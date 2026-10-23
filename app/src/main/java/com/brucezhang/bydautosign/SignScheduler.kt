@@ -1,7 +1,6 @@
 package com.brucezhang.bydautosign
 
-import android.Manifest
-import android.app.AlarmManager
+ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -51,6 +50,11 @@ internal object ScheduleTimes {
 
     fun firstToday(times: String, now: ZonedDateTime = ZonedDateTime.now()): ZonedDateTime =
         ZonedDateTime.of(now.toLocalDate(), LocalTime.parse(requireNotNull(normalize(times)).split(',').first()), now.zone)
+}
+
+internal enum class ScheduleRecoverySource {
+    APP_START, FOREGROUND, BOOT, PACKAGE_UPDATED, TIME_CHANGED, TIMEZONE_CHANGED,
+    ALARM_PERMISSION_CHANGED, WATCHDOG, UNKNOWN
 }
 
 internal object SignScheduler {
@@ -107,9 +111,14 @@ internal object SignScheduler {
             if (scheduledExact) " · 精确唤醒" else " · 非精确（需授权闹钟）"
     }
 
+    /** WorkManager KEEP is the final safety net against overlapping alarms and repair passes. */
     fun enqueue(context: Context) {
         val store = SignStore(context)
         if (!store.enabled || store.signedToday()) return
+        store.automaticBlockKind()?.let {
+            ScheduleTelemetry(context).suppressed(it)
+            return
+        }
         val request = OneTimeWorkRequestBuilder<SignWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
@@ -121,11 +130,49 @@ internal object SignScheduler {
 
     fun compensate(context: Context) {
         val store = SignStore(context)
-        if (store.enabled && !store.signedToday() &&
-            !ZonedDateTime.now().isBefore(ScheduleTimes.firstToday(store.times))) {
+        val now = ZonedDateTime.now()
+        val blocked = store.automaticBlockKind(now.toInstant().toEpochMilli())
+        if (blocked != null) {
+            ScheduleTelemetry(context).suppressed(blocked)
+            return
+        }
+        if (SignRecoveryPolicy.shouldCompensate(
+                store.enabled, store.signedToday(),
+                now.toInstant().toEpochMilli(),
+                ScheduleTimes.firstToday(store.times, now).toInstant().toEpochMilli(),
+                store.lastRun
+            )) {
             ScheduleTelemetry(context).compensation()
             enqueue(context)
         }
+    }
+
+    /**
+     * Repair overdue/unknown plans on foreground resume, and re-arm on boot,
+     * time changes and watchdog ticks (exact-alarm revocation can be silent).
+     * Rescheduling never starts WeChat and never accesses a session.
+     */
+    fun recover(context: Context, source: ScheduleRecoverySource, force: Boolean = false) {
+        val store = SignStore(context)
+        val telemetry = ScheduleTelemetry(context)
+        val prior = telemetry.snapshot()
+        val now = System.currentTimeMillis()
+        val stale = store.enabled && SignRecoveryPolicy.planOverdue(prior.nextAt, now)
+        val absent = store.enabled && prior.nextAt <= 0L
+        if (force || stale || absent) {
+            val detail = when {
+                stale -> "overdue"
+                absent -> "missing"
+                else -> "rearmed"
+            }
+            runCatching {
+                reschedule(context)
+                telemetry.recovered(source.name, detail)
+            }.onFailure {
+                telemetry.recoveryFailed(source.name)
+            }
+        }
+        compensate(context)
     }
 
     fun configure(context: Context, enabled: Boolean, times: String): String {
@@ -149,8 +196,16 @@ class SignAlarmReceiver : BroadcastReceiver() {
 
 class SignRescheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        SignScheduler.reschedule(context)
-        SignScheduler.compensate(context)
+        val source = when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED -> ScheduleRecoverySource.BOOT
+            Intent.ACTION_MY_PACKAGE_REPLACED -> ScheduleRecoverySource.PACKAGE_UPDATED
+            Intent.ACTION_TIME_CHANGED -> ScheduleRecoverySource.TIME_CHANGED
+            Intent.ACTION_TIMEZONE_CHANGED -> ScheduleRecoverySource.TIMEZONE_CHANGED
+            "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" ->
+                ScheduleRecoverySource.ALARM_PERMISSION_CHANGED
+            else -> ScheduleRecoverySource.UNKNOWN
+        }
+        SignScheduler.recover(context, source, force = true)
     }
 }
 
@@ -164,6 +219,10 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         }
         if (store.signedToday()) {
             telemetry.finished("今日已签到，跳过")
+            return@withContext Result.success()
+        }
+        store.automaticBlockKind()?.let {
+            telemetry.suppressed(it)
             return@withContext Result.success()
         }
         telemetry.started()
@@ -188,8 +247,7 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 class SignWatchdogWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         ScheduleTelemetry(applicationContext).watchdog()
-        SignScheduler.reschedule(applicationContext)
-        SignScheduler.compensate(applicationContext)
+        SignScheduler.recover(applicationContext, ScheduleRecoverySource.WATCHDOG, force = true)
         Result.success()
     }
 }
