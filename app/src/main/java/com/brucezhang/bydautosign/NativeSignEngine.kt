@@ -144,6 +144,10 @@ internal class NativeSignEngine(
             .header("Accept-Encoding", "identity")
             .header("Referer", "https://servicewechat.com/${BydProtocol.APP_ID}/142/page-frame.html")
             .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .header("Sec-Fetch-Site", "cross-site")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Priority", "u=1, i")
             .header("User-Agent", USER_AGENT)
             .build()
         client.newCall(req).execute().use { response ->

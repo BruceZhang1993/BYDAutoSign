@@ -78,6 +78,9 @@ internal class NativeSignManager(private val context: android.content.Context) {
         val sessionCheck = runCatching { store.session() }
         val hook = try { JSONObject(IpcBrokerService.readHookStatus() ?: "{}") }
             catch (_: Exception) { JSONObject() }
+        // If a prior alarm was missed while offline/asleep, avoid losing it
+        // when a foreground refresh cancels and replaces the PendingIntent.
+        SignScheduler.compensate(context)
         val formatted = if (store.lastRun > 0) DateTimeFormatter.ofPattern("MM-dd HH:mm")
             .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(store.lastRun)) else ""
         NativeUiState(
