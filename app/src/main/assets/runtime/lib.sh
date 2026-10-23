@@ -186,19 +186,36 @@ _is_signed_today() {
 }
 
 # === crond lifecycle and observable health ===
-# Match our exact -c directory rather than killing other Root modules' cron.
+# BusyBox crond's argv format differs by Root manager and Android version.
+# /proc/pid/cwd is a fallback because crond changes directory to its spool.
+is_own_crond() {
+    local command_line="$1" cwd="$2"
+    case "$command_line" in
+        *crond*" -c $WORK_DIR/cron.d "*|*crond*" -c$WORK_DIR/cron.d "*)
+            return 0
+            ;;
+    esac
+    if [ "$cwd" = "$WORK_DIR/cron.d" ]; then
+        case "$command_line" in
+            *crond*) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
 own_crond_pids() {
-    local file cmd pid
+    local file pid command_line cwd state
     for file in /proc/[0-9]*/cmdline; do
         [ -r "$file" ] || continue
-        cmd=$(tr '\000' ' ' < "$file" 2>/dev/null) || continue
-        case "$cmd" in
-            *crond*" -c $WORK_DIR/cron.d "*|*crond*" -c$WORK_DIR/cron.d "*)
-                pid=${file#/proc/}
-                pid=${pid%/cmdline}
-                printf '%s\n' "$pid"
-                ;;
-        esac
+        pid=${file#/proc/}
+        pid=${pid%/cmdline}
+        state=$(sed -n 's/^State:[[:space:]]*\([A-Z]\).*/\1/p' "/proc/$pid/status" 2>/dev/null)
+        [ "$state" = Z ] && continue
+        command_line=$(tr '\000' ' ' < "$file" 2>/dev/null) || continue
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || cwd=""
+        if is_own_crond "$command_line" "$cwd"; then
+            printf '%s\n' "$pid"
+        fi
     done
 }
 
@@ -213,6 +230,30 @@ stop_crond() {
     done
 }
 
+find_crond_busybox() {
+    local candidate
+    for candidate in \
+        /data/adb/ksu/bin/busybox \
+        /data/adb/ap/bin/busybox \
+        /data/adb/ap/busybox \
+        /data/adb/magisk/busybox \
+        /data/adb/modules/busybox-ndk/system/xbin/busybox \
+        /system/xbin/busybox \
+        /system/bin/busybox; do
+        if [ -x "$candidate" ] &&
+            "$candidate" --list 2>/dev/null | grep -qx crond; then
+            BUSYBOX="$candidate"
+            return 0
+        fi
+    done
+    if command -v busybox >/dev/null 2>&1 &&
+        busybox --list 2>/dev/null | grep -qx crond; then
+        BUSYBOX="$(command -v busybox)"
+        return 0
+    fi
+    return 1
+}
+
 restart_crond() {
     local status=0
     mkdir -p "$LOG_DIR" "$WORK_DIR/cron.d" || return 1
@@ -220,23 +261,13 @@ restart_crond() {
         echo "CRON_ERROR: root crontab is missing" >&2
         return 1
     }
-    stop_crond
-    sleep 1
-    find_busybox
-    if [ "$BUSYBOX" = "busybox" ]; then
-        command -v busybox >/dev/null 2>&1 || {
-            echo "CRON_ERROR: BusyBox is not installed in Root environment" >&2
-            return 127
-        }
-    elif [ ! -x "$BUSYBOX" ]; then
-        echo "CRON_ERROR: BusyBox is not executable: $BUSYBOX" >&2
+    if ! find_crond_busybox; then
+        echo "CRON_ERROR: no executable BusyBox with crond applet found" >&2
         return 127
     fi
-    "$BUSYBOX" --list | grep -qx crond || {
-        echo "CRON_ERROR: this BusyBox does not include crond" >&2
-        return 127
-    }
-    # Keep the same filename across midnight for diagnostics.
+    # Find a replacement before terminating any existing owned scheduler.
+    stop_crond
+    sleep 1
     "$BUSYBOX" crond -b -c "$WORK_DIR/cron.d" -L "$LOG_DIR/cron.log" 2>>"$LOG_DIR/scheduler.log" || status=$?
     if [ "$status" -ne 0 ]; then
         echo "CRON_ERROR: crond launch failed (exit $status)" >&2
@@ -244,7 +275,7 @@ restart_crond() {
     fi
     sleep 1
     if ! cron_running; then
-        echo "CRON_ERROR: crond exited shortly after startup" >&2
+        echo "CRON_ERROR: crond not detectable after launch (check ps and cron.log)" >&2
         return 1
     fi
     return 0
