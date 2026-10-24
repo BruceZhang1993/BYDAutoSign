@@ -501,7 +501,7 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                         OverviewHeading("诊断报告")
                         Spacer(Modifier.height(8.dp))
                         SectionCard {
-                            Text("导出仅包含时间、枚举错误类型、调度状态和权限摘要；不包含微信 code、BYD session、原始响应、Binder 原文或异常堆栈。",
+                            Text("导出包含时间、错误分类、服务端数字错误码、安全过滤后的中文提示、调度状态和权限摘要；不包含微信 code、BYD session、原始响应、Binder 原文或异常堆栈。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             OutlinedButton(onClick = {
