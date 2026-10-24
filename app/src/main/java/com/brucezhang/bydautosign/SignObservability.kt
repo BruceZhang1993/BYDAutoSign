@@ -12,6 +12,7 @@ import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
+import java.time.ZoneId
 
 /** Never persist raw service messages, codes, session IDs, or exception text. */
 internal enum class SignFailureKind(val label: String) {
@@ -20,7 +21,9 @@ internal enum class SignFailureKind(val label: String) {
     TLS("TLS 验证失败"), SERVER("服务端异常"), HTTP_CLIENT("请求被拒绝"),
     PROTOCOL("协议或响应异常"), BUSINESS("业务失败"), UNKNOWN("未知错误")
 }
-internal enum class SignOrigin(val label: String) { MANUAL("手动"), SCHEDULED("自动") }
+internal enum class SignOrigin(val label: String) {
+    MANUAL("手动"), SCHEDULED("自动"), RESTORED("历史补录")
+}
 internal enum class SignRecordStatus(val label: String) {
     SUCCESS("成功"), FAILED("失败"), ALREADY_SIGNED("已签到")
 }
@@ -31,6 +34,25 @@ internal data class SignHistoryEntry(
     val failure: SignFailureKind,
     val attempt: Int = 1
 )
+
+/** Only reconstruct a known completed request from a persisted timestamp; never
+ * invent a sign request for a date that has no saved execution time. */
+internal object SignHistoryRecovery {
+    fun candidate(signedDate: String, lastRun: Long, lastResult: String,
+                  existing: List<SignHistoryEntry>): SignHistoryEntry? {
+        if (lastRun <= 0 || signedDate != SignDatePolicy.completedLocalDate(lastRun)) return null
+        val status = when {
+            lastResult.startsWith("签到成功") -> SignRecordStatus.SUCCESS
+            lastResult.startsWith("今日已签到") -> SignRecordStatus.ALREADY_SIGNED
+            else -> return null
+        }
+        if (existing.any {
+                it.status != SignRecordStatus.FAILED &&
+                    SignDatePolicy.completedLocalDate(it.timestamp) == signedDate
+            }) return null
+        return SignHistoryEntry(lastRun, SignOrigin.RESTORED, status, SignFailureKind.NONE)
+    }
+}
 
 /** Bounded private history; only enums, timestamps and attempt counts are recorded. */
 internal class SignHistory(context: Context) {
@@ -52,6 +74,12 @@ internal class SignHistory(context: Context) {
             } catch (_: Exception) { null }
         }
     }
+
+    fun recoverLastSuccess(signedDate: String, lastRun: Long, lastResult: String) =
+        synchronized(monitor) {
+            val recovered = SignHistoryRecovery.candidate(signedDate, lastRun, lastResult, list())
+            if (recovered != null) append(recovered)
+        }
 
     fun append(entry: SignHistoryEntry) = synchronized(monitor) {
         val array = JSONArray()

@@ -21,6 +21,8 @@ class DiagnosticReportTest {
             signedToday = false,
             history = listOf(SignHistoryEntry(1000L, SignOrigin.SCHEDULED,
                 SignRecordStatus.FAILED, SignFailureKind.NETWORK, 3)),
+            scheduleEvents = listOf(ScheduleEventEntry(1100L,
+                ScheduleEventType.SKIPPED_SIGNED, ScheduleEventSource.ALARM)),
             scheduleTrace = ScheduleSnapshot(nextAt = 12345L,
                 lastState = "签到失败 " + secret,
                 lastRecoverySource = secret, lastRecoveryDetail = secret,
@@ -31,7 +33,7 @@ class DiagnosticReportTest {
             notificationsAllowed = true)
         assertFalse(serialized.contains(secret))
         val json = JSONObject(serialized)
-        assertEquals(1, json.getInt("schema"))
+        assertEquals(2, json.getInt("schema"))
         assertEquals("0.5.2", json.getString("appVersion"))
         assertEquals(35, json.getInt("androidApi"))
         assertTrue(json.getJSONObject("permissions").getBoolean("notificationsAllowed"))
@@ -40,6 +42,11 @@ class DiagnosticReportTest {
         val event = json.getJSONArray("history").getJSONObject(0)
         assertEquals("NETWORK", event.getString("failure"))
         assertEquals(3, event.getInt("attempt"))
+        val events = json.getJSONArray("scheduleEvents")
+        assertEquals(1, events.length())
+        assertEquals("SKIPPED_SIGNED", events.getJSONObject(0).getString("type"))
+        assertEquals("ALARM", events.getJSONObject(0).getString("source"))
+        assertEquals(1, json.getJSONObject("sign").getInt("scheduleEventCount"))
         val sched = json.getJSONObject("schedule")
         assertEquals("07:01,22:01", sched.getString("times"))
         assertEquals("FAILED", sched.getString("workerState"))

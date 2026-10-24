@@ -61,6 +61,7 @@ internal data class NativeUiState(
     val lastRun: String = "",
     val signedToday: Boolean = false,
     val history: List<SignHistoryEntry> = emptyList(),
+    val scheduleEvents: List<ScheduleEventEntry> = emptyList(),
     val scheduleTrace: ScheduleSnapshot = ScheduleSnapshot()
 )
 
@@ -75,6 +76,11 @@ internal class NativeSignManager(private val context: android.content.Context) {
         SignScheduler.recover(context, ScheduleRecoverySource.FOREGROUND)
         val formatted = if (store.lastRun > 0) DateTimeFormatter.ofPattern("MM-dd HH:mm")
             .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(store.lastRun)) else ""
+        // Old installs can have a persisted successful result but no v0.5.1
+        // history entry. Reconcile only when the actual completion time is known.
+        runCatching {
+            SignHistory(context).recoverLastSuccess(store.signedDate, store.lastRun, store.lastResult)
+        }
         val telemetry = ScheduleTelemetry(context).snapshot()
         val next = when {
             !store.enabled -> "自动签到已关闭"
@@ -103,6 +109,7 @@ internal class NativeSignManager(private val context: android.content.Context) {
             lastRun = formatted,
             signedToday = store.signedToday(),
             history = SignHistory(context).list(),
+            scheduleEvents = ScheduleEventLog(context).list(),
             scheduleTrace = telemetry
         )
     }
@@ -170,7 +177,7 @@ internal class NativeSignManager(private val context: android.content.Context) {
 
     suspend fun saveSchedule(enabled: Boolean, times: String): ActionResult = withContext(Dispatchers.IO) {
         val valid = ScheduleTimes.normalize(times) != null
-        if (!valid) ActionResult(false, "请输入 HH:mm，多个时间用英文逗号分隔（最多8组）")
+        if (!valid) ActionResult(false, "请选择至少一个有效时间（最多8组）")
         else {
             val result = SignScheduler.configure(context, enabled, times)
             ActionResult(!result.startsWith("设置定时失败"), result)
