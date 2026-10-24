@@ -48,18 +48,13 @@ On the home screen, tap **Check in now** (**立即签到**) to check in manually
 
 ### 3. Schedule daily check-ins
 
-Open **Settings** (**设置**), enable daily automatic check-in and enter one or more times:
-
-- `07:01` — one time each day.
-- `07:01,13:01,22:01` — multiple opportunities throughout the day.
-
-Use a 24-hour clock and commas to separate times (up to **8**). Tap **Save changes** (**保存更改**). The home screen shows the next planned time.
+Open **Settings** (**设置**), enable daily automatic check-in and tap **Add time** to choose a time using the 24-hour system time picker. You can edit or remove individual times (up to **8**), then tap **Save changes** (**保存更改**). The home screen shows the next planned time.
 
 If your phone offers **exact alarm permission**, enabling it can reduce delays. Some phones may also need fewer battery or background restrictions for reliable scheduling.
 
 ### 4. View results
 
-Check today's status and recent activity on the home screen. Open **Check-in history** (**签到记录**) for past results or **Diagnostics** (**运行诊断**) to review scheduling and export a diagnostic report.
+The home screen shows recent check-ins and schedule events separately. Open **Check-in history** (**签到记录**) and switch to **Schedule triggers** (**调度触发**) to confirm an alarm actually fired, work was queued, or an already-completed check-in was safely skipped. A skipped trigger does not submit a second check-in. Use **Diagnostics** (**运行诊断**) for detailed status and redacted exports.
 
 Enable notification permission if you want result alerts. Disabling notifications does not disable check-ins.
 
