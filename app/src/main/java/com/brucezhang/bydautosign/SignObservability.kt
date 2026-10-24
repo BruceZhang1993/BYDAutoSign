@@ -14,7 +14,7 @@ import org.json.JSONObject
 import java.time.LocalDate
 import java.time.ZoneId
 
-/** Never persist raw service messages, codes, session IDs, or exception text. */
+/** Never persist raw responses, credentials, or unfiltered exception text. */
 internal enum class SignFailureKind(val label: String) {
     NONE("无"), NO_SESSION("未授权"), SESSION_UNREADABLE("本地会话异常"),
     AUTH_EXPIRED("会话过期"), NETWORK("网络异常"), TIMEOUT("请求超时"),
@@ -72,7 +72,7 @@ internal object SignHistoryRecovery {
     }
 }
 
-/** Bounded private history; only enums, timestamps and attempt counts are recorded. */
+/** Bounded private history; only typed codes and sanitized messages are persisted. */
 internal class SignHistory(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("byd_sign_history", Context.MODE_PRIVATE)
 
