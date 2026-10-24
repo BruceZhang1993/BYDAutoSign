@@ -112,7 +112,8 @@ internal object ResponseFields {
 internal class ProtocolException(
     message: String,
     val failure: SignFailureKind = SignFailureKind.PROTOCOL,
-    val retryable: Boolean = false
+    val retryable: Boolean = false,
+    val httpStatus: Int? = null
 ) : IOException(message)
 internal class AuthenticationExpired : IOException("会话已失效，请重新授权")
 
@@ -123,7 +124,10 @@ internal data class SignOutcome(
     val shouldRetry: Boolean = false,
     val authorizationExpired: Boolean = false,
     val alreadySigned: Boolean = false,
-    val failure: SignFailureKind = SignFailureKind.NONE
+    val failure: SignFailureKind = SignFailureKind.NONE,
+    val businessCode: Int? = null,
+    val serverMessage: String? = null,
+    val httpStatus: Int? = null
 )
 
 /**
@@ -157,28 +161,43 @@ internal class NativeSignEngine(
             failure = SignFailureKind.NO_SESSION)
         return try {
             val json = request("activity/sign/signIn", BydProtocol.signPayload(session))
-            if (ResponseFields.int(json, "ret") == 200) {
+            val ret = ResponseFields.int(json, "ret")
+            if (ret == 200) {
                 SignOutcome(true, "签到成功",
                     (ResponseFields.int(json, "durationDays") ?: 0).coerceAtLeast(0))
             } else {
-                // Inspect only for known server signals; never show or store raw body.
-                val safeText = listOfNotNull(ResponseFields.text(json, "msg"),
-                    ResponseFields.text(json, "message")).joinToString(" ")
+                // Inspect the raw response in memory only. Never persist raw response bodies
+                // or unsanitized server messages (they may contain session identifiers).
+                val serverText = listOfNotNull(
+                    ResponseFields.text(json, "msg"),
+                    ResponseFields.text(json, "message")
+                ).joinToString(" ").trim()
+                val safeMessage = SignFailureDiagnostics.safeServerMessage(serverText)
+                val codeDescription = ret?.let { "ret=$it" } ?: "ret=未知"
                 val expired = Regex(
-                    "session[_ ]?id.{0,32}(失效|过期|invalid|expired)|未登录|登录已过期|session expired|invalid session",
+                    """session[_ -]?id.{0,32}(失效|过期|无效|invalid|expired)|""" +
+                    """(登录|会话|授权)(态|状态|信息|凭证)?.{0,12}(失效|过期|无效)|""" +
+                    """(请先登录|请重新登录|重新授权|未登录|登录已过期|""" +
+                    """session expired|invalid session|authentication expired)""",
                     RegexOption.IGNORE_CASE
-                ).containsMatchIn(safeText)
-                // If BYD reports an already-completed sign-in, stop attempts
-                // and suppress the system notification for that day.
-                val alreadySigned = !expired && Regex("已签到|已经签到|今日已签|重复签到|already signed",
-                    RegexOption.IGNORE_CASE).containsMatchIn(safeText)
+                ).containsMatchIn(serverText)
+                val alreadySigned = !expired && Regex(
+                    "已签到|已经签到|今日已签|重复签到|already signed",
+                    RegexOption.IGNORE_CASE
+                ).containsMatchIn(serverText)
                 when {
                     alreadySigned -> SignOutcome(true, "今日已签到，无需重复执行",
-                        alreadySigned = true)
-                    expired -> SignOutcome(false, "会话过期，需要重新授权",
-                        authorizationExpired = true, failure = SignFailureKind.AUTH_EXPIRED)
-                    else -> SignOutcome(false, "签到未成功",
-                        failure = SignFailureKind.BUSINESS)
+                        alreadySigned = true, businessCode = ret, serverMessage = safeMessage)
+                    expired -> SignOutcome(false, "会话过期，需要重新授权 · $codeDescription",
+                        authorizationExpired = true, failure = SignFailureKind.AUTH_EXPIRED,
+                        businessCode = ret, serverMessage = safeMessage)
+                    else -> SignOutcome(false,
+                        "签到未成功 · $codeDescription · " + (
+                            safeMessage ?: if (serverText.isBlank()) "服务端未返回错误说明"
+                            else "服务端提示已隐藏（可能包含敏感信息）"
+                        ),
+                        failure = SignFailureKind.BUSINESS, businessCode = ret,
+                        serverMessage = safeMessage)
                 }
             }
         } catch (e: IOException) {
@@ -197,10 +216,12 @@ internal class NativeSignEngine(
                 SignFailureKind.HTTP_CLIENT -> "服务器拒绝签到请求"
                 else -> "协议或响应异常"
             }
-            SignOutcome(false, message,
+            SignOutcome(false, message + ((e as? ProtocolException)?.httpStatus?.let {
+                "（HTTP $it）"
+            } ?: ""),
                 shouldRetry = if (e is ProtocolException) e.retryable
                     else category == SignFailureKind.NETWORK || category == SignFailureKind.TIMEOUT,
-                failure = category)
+                failure = category, httpStatus = (e as? ProtocolException)?.httpStatus)
         } catch (_: Exception) {
             SignOutcome(false, "响应解析失败", failure = SignFailureKind.UNKNOWN)
         }
@@ -238,13 +259,13 @@ internal class NativeSignEngine(
             if (!response.isSuccessful) {
                 if (response.code == 408)
                     throw ProtocolException("请求超时（HTTP 408）",
-                        SignFailureKind.TIMEOUT, retryable = true)
+                        SignFailureKind.TIMEOUT, retryable = true, httpStatus = response.code)
                 if (response.code == 429 || response.code in 500..599)
                     throw ProtocolException("服务端暂不可用（HTTP ${response.code}）",
-                        SignFailureKind.SERVER, retryable = true)
+                        SignFailureKind.SERVER, retryable = true, httpStatus = response.code)
                 if (response.code in 400..499)
                     throw ProtocolException("服务端拒绝请求（HTTP ${response.code}）",
-                        SignFailureKind.HTTP_CLIENT)
+                        SignFailureKind.HTTP_CLIENT, httpStatus = response.code)
                 throw ProtocolException("服务端异常", SignFailureKind.SERVER)
             }
             val text = response.body?.string()?.takeIf { it.isNotBlank() }
