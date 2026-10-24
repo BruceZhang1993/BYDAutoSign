@@ -1,6 +1,7 @@
 package com.brucezhang.bydautosign
 
 import android.Manifest
+import android.app.TimePickerDialog
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -35,8 +36,10 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 private enum class SignPage { HOME, SETTINGS, HISTORY, DIAGNOSTICS }
+private enum class HistoryTab { SIGN, SCHEDULE }
 
 /** Keep the primary result on the overview; configuration and technical details are secondary. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -48,6 +51,7 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
     val mutex = remember { Mutex() }
     val snackbars = remember { SnackbarHostState() }
     var page by remember { mutableStateOf(SignPage.HOME) }
+    var historyTab by remember { mutableStateOf(HistoryTab.SIGN) }
     var state by remember { mutableStateOf(NativeUiState()) }
     var loaded by remember { mutableStateOf(false) }
     var enabled by remember { mutableStateOf(true) }
@@ -89,6 +93,26 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
             times = state.times
             loaded = true
         }
+    }
+
+    // A platform 24-hour time picker replaces the comma-separated free text field.
+    // Keep the normalized persisted format for backwards compatibility.
+    fun pickTime(previous: String? = null) {
+        val seed = previous ?: "07:01"
+        val hour = seed.substringBefore(':').toIntOrNull() ?: 7
+        val minute = seed.substringAfter(':').toIntOrNull() ?: 1
+        TimePickerDialog(context, { _, chosenHour, chosenMinute ->
+            val value = String.format(Locale.ROOT, "%02d:%02d", chosenHour, chosenMinute)
+            val entries = ScheduleTimes.normalize(times)?.split(',')?.toMutableList()
+                ?: mutableListOf()
+            if (previous != null) entries.remove(previous)
+            if (value in entries) {
+                scope.launch { snackbars.showSnackbar("这个签到时间已存在") }
+            } else {
+                entries.add(value)
+                times = entries.sorted().joinToString(",")
+            }
+        }, hour, minute, true).show()
     }
 
     fun runAction(action: suspend () -> ActionResult) {
@@ -166,7 +190,8 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                             onSign = { runAction { manager.sign() } })
                     }
                     item {
-                        OverviewHeading("最近记录", action = "查看全部", onAction = {
+                        OverviewHeading("最近签到", action = "查看全部", onAction = {
+                            historyTab = HistoryTab.SIGN
                             page = SignPage.HISTORY
                         })
                         Spacer(Modifier.height(8.dp))
@@ -178,6 +203,25 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                                 state.history.take(3).forEachIndexed { index, entry ->
                                     HistoryEntryRow(entry)
                                     if (index < minOf(3, state.history.size) - 1) HorizontalDivider()
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        OverviewHeading("最近调度", action = "查看全部", onAction = {
+                            historyTab = HistoryTab.SCHEDULE
+                            page = SignPage.HISTORY
+                        })
+                        Spacer(Modifier.height(8.dp))
+                        SectionCard {
+                            if (state.scheduleEvents.isEmpty()) {
+                                Text("暂无定时触发记录。首次闹钟触发后会显示在这里。",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                state.scheduleEvents.take(2).forEachIndexed { index, event ->
+                                    ScheduleEventRow(event)
+                                    if (index < minOf(2, state.scheduleEvents.size) - 1) HorizontalDivider()
                                 }
                             }
                         }
@@ -244,15 +288,38 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                                 Switch(checked = enabled, onCheckedChange = { enabled = it })
                             }
                             HorizontalDivider()
-                            OutlinedTextField(
-                                value = times,
-                                onValueChange = { times = it },
-                                label = { Text("签到时间") },
-                                supportingText = { Text("24 小时制；多个时间用逗号分隔，最多 8 个") },
-                                placeholder = { Text("07:01,13:01,22:01") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            Text("签到时间", style = MaterialTheme.typography.titleSmall)
+                            Text("每天按以下时间尝试签到，已签到时仍记录闹钟触发与跳过。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            val selectedTimes = ScheduleTimes.normalize(times)?.split(',') ?: emptyList()
+                            selectedTimes.forEach { value ->
+                                Row(modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(onClick = { pickTime(value) },
+                                        modifier = Modifier.weight(1f)) {
+                                        Icon(Icons.Outlined.AccessTime, contentDescription = null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(value, style = MaterialTheme.typography.titleMedium)
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            times = selectedTimes.filterNot { it == value }.joinToString(",")
+                                        },
+                                        enabled = selectedTimes.size > 1
+                                    ) {
+                                        Icon(Icons.Outlined.DeleteOutline,
+                                            contentDescription = "删除 $value")
+                                    }
+                                }
+                            }
+                            TextButton(onClick = { pickTime() },
+                                enabled = selectedTimes.size < 8) {
+                                Icon(Icons.Outlined.Add, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("添加时间（${selectedTimes.size}/8）")
+                            }
                             Text(if (enabled) state.next else "关闭后将取消自动签到",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -329,15 +396,50 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     item {
-                        Text("最近 " + state.history.size + " 次实际签到尝试 · 最多保留 100 条",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(selected = historyTab == HistoryTab.SIGN,
+                                onClick = { historyTab = HistoryTab.SIGN },
+                                label = { Text("签到记录") })
+                            FilterChip(selected = historyTab == HistoryTab.SCHEDULE,
+                                onClick = { historyTab = HistoryTab.SCHEDULE },
+                                label = { Text("调度触发") })
+                        }
                     }
-                    if (state.history.isEmpty()) {
-                        item { SectionCard { Text("尚无签到记录") } }
+                    if (historyTab == HistoryTab.SIGN) {
+                        item {
+                            Text("最近 " + state.history.size + " 次实际签到请求 · 最多 100 条",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (state.signedToday && state.history.none {
+                                it.status != SignRecordStatus.FAILED &&
+                                    SignDatePolicy.completedLocalDate(it.timestamp) == LocalDate.now().toString()
+                            }) {
+                            item {
+                                SectionCard {
+                                    Text("今日状态已确认签到，但缺少对应的历史事件。可能在旧版本中完成了签到；不会伪造请求记录。",
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                        if (state.history.isEmpty()) {
+                            item { SectionCard { Text("暂无实际签到记录") } }
+                        } else {
+                            items(state.history) { entry -> SectionCard { HistoryEntryRow(entry) } }
+                        }
                     } else {
-                        items(state.history) { entry ->
-                            SectionCard { HistoryEntryRow(entry) }
+                        item {
+                            Text("最近 " + state.scheduleEvents.size +
+                                " 条闹钟和任务调度事件 · 最多 100 条；不会重复提交签到",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (state.scheduleEvents.isEmpty()) {
+                            item { SectionCard { Text("尚无调度触发记录") } }
+                        } else {
+                            items(state.scheduleEvents) { event ->
+                                SectionCard { ScheduleEventRow(event) }
+                            }
                         }
                     }
                 }
@@ -430,7 +532,7 @@ private fun TodaySummary(
         else -> "等待今日签到"
     }
     val statusDetail = when {
-        state.signedToday -> "今日任务已完成，不再重复执行或提醒"
+        state.signedToday -> "今日已完成；后续定时触发将记录跳过，不重复签到"
         !state.sessionReady -> "完成微信授权后，才能进行签到"
         latestFailureToday -> state.lastResult
         !state.enabled -> "定时任务已关闭，仍可手动签到"
@@ -549,14 +651,40 @@ private fun HistoryEntryRow(entry: SignHistoryEntry) {
             Text(entry.status.label + " · " + entry.origin.label,
                 style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
             Text(if (success) {
-                if (entry.status == SignRecordStatus.ALREADY_SIGNED) "今日已签到，无重复提醒"
-                else "签到成功"
+                when {
+                    entry.origin == SignOrigin.RESTORED -> "根据已保存的执行结果补录"
+                    entry.status == SignRecordStatus.ALREADY_SIGNED -> "服务端已签到，无重复提醒"
+                    else -> "签到成功"
+                }
             } else {
                 entry.failure.label + " · 第 " + entry.attempt + " 次尝试"
             }, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text(viewTime(entry.timestamp, true),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ScheduleEventRow(event: ScheduleEventEntry) {
+    val skipped = event.type == ScheduleEventType.SKIPPED_SIGNED ||
+        event.type == ScheduleEventType.SKIPPED_BLOCKED ||
+        event.type == ScheduleEventType.SKIPPED_DISABLED
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Icon(if (skipped) Icons.Outlined.DoNotDisturbOn else Icons.Outlined.Schedule,
+            contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(event.type.label, style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium)
+            Text(event.source.label +
+                if (event.type == ScheduleEventType.SKIPPED_BLOCKED) " · ${event.failure.label}" else "",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(viewTime(event.timestamp),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
