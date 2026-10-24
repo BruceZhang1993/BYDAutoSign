@@ -117,11 +117,20 @@ internal object SignScheduler {
     }
 
     /** WorkManager KEEP is the final safety net against overlapping alarms and repair passes. */
-    fun enqueue(context: Context) {
+    fun enqueue(context: Context, source: ScheduleEventSource = ScheduleEventSource.COMPENSATION) {
         val store = SignStore(context)
-        if (!store.enabled || store.signedToday()) return
+        if (!store.enabled) {
+            runCatching { ScheduleEventLog(context).append(ScheduleEventType.SKIPPED_DISABLED, source) }
+            return
+        }
+        if (store.signedToday()) {
+            // Keep a durable audit trail even when no network sign request is necessary.
+            runCatching { ScheduleEventLog(context).append(ScheduleEventType.SKIPPED_SIGNED, source) }
+            return
+        }
         store.automaticBlockKind()?.let {
             ScheduleTelemetry(context).suppressed(it)
+            runCatching { ScheduleEventLog(context).append(ScheduleEventType.SKIPPED_BLOCKED, source, it) }
             return
         }
         val request = OneTimeWorkRequestBuilder<SignWorker>()
@@ -131,6 +140,7 @@ internal object SignScheduler {
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
         ScheduleTelemetry(context).enqueued()
+        runCatching { ScheduleEventLog(context).append(ScheduleEventType.WORK_QUEUED, source) }
     }
 
     fun compensate(context: Context) {
@@ -198,8 +208,10 @@ internal object SignScheduler {
 class SignAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         ScheduleTelemetry(context).alarmFired()
+        runCatching { ScheduleEventLog(context).append(
+            ScheduleEventType.ALARM_FIRED, ScheduleEventSource.ALARM) }
         SignScheduler.reschedule(context)
-        SignScheduler.enqueue(context)
+        SignScheduler.enqueue(context, ScheduleEventSource.ALARM)
     }
 }
 
@@ -224,14 +236,20 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val store = SignStore(applicationContext)
         if (!store.enabled) {
             telemetry.finished("自动签到已关闭")
+            runCatching { ScheduleEventLog(applicationContext).append(
+                ScheduleEventType.SKIPPED_DISABLED, ScheduleEventSource.WORKER) }
             return@withContext Result.success()
         }
         if (store.signedToday()) {
             telemetry.finished("今日已签到，跳过")
+            runCatching { ScheduleEventLog(applicationContext).append(
+                ScheduleEventType.SKIPPED_SIGNED, ScheduleEventSource.WORKER) }
             return@withContext Result.success()
         }
         store.automaticBlockKind()?.let {
             telemetry.suppressed(it)
+            runCatching { ScheduleEventLog(applicationContext).append(
+                ScheduleEventType.SKIPPED_BLOCKED, ScheduleEventSource.WORKER, it) }
             return@withContext Result.success()
         }
         telemetry.started()
