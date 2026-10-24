@@ -660,9 +660,16 @@ private fun HistoryEntryRow(entry: SignHistoryEntry) {
                     else -> "签到成功"
                 }
             } else {
-                entry.failure.label + " · 第 " + entry.attempt + " 次尝试"
+                entry.failure.label + " · 第 " + entry.attempt + " 次尝试" +
+                    (entry.businessCode?.let { " · ret=$it" } ?: "") +
+                    (entry.httpStatus?.let { " · HTTP $it" } ?: "")
             }, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!success && entry.serverMessage != null) {
+                Text("服务端提示：" + entry.serverMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         Text(viewTime(entry.timestamp, true),
             style = MaterialTheme.typography.labelSmall,
