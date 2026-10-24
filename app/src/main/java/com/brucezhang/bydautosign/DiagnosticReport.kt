@@ -35,8 +35,16 @@ internal object DiagnosticReport {
                 .put("failure", entry.failure.name)
                 .put("attempt", entry.attempt.coerceIn(1, 20)))
         }
+        val wakeups = JSONArray()
+        state.scheduleEvents.take(100).forEach { event ->
+            wakeups.put(JSONObject()
+                .put("timestampMs", event.timestamp)
+                .put("type", event.type.name)
+                .put("source", event.source.name)
+                .put("failure", event.failure.name))
+        }
         val report = JSONObject()
-            .put("schema", 1)
+            .put("schema", 2)
             .put("generatedAtUtc", Instant.ofEpochMilli(generatedAt).toString())
             .put("appVersion", appVersion)
             .put("androidApi", sdk)
@@ -50,7 +58,8 @@ internal object DiagnosticReport {
                 .put("notificationsAllowed", notificationsAllowed))
             .put("sign", JSONObject()
                 .put("signedToday", state.signedToday)
-                .put("historyCount", state.history.size))
+                .put("historyCount", state.history.size)
+                .put("scheduleEventCount", state.scheduleEvents.size))
             .put("schedule", JSONObject()
                 .put("enabled", state.enabled)
                 .put("times", ScheduleTimes.normalize(state.times) ?: "invalid")
@@ -71,6 +80,7 @@ internal object DiagnosticReport {
                 .put("blockedFailure", safeFailureName(trace.lastSuppressedKind))
                 .put("crossDayAttempts", trace.crossDayAttempts))
             .put("history", attempts)
+            .put("scheduleEvents", wakeups)
         return report.toString(2)
     }
 
