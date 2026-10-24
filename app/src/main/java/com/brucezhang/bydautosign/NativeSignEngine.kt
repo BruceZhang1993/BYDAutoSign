@@ -161,7 +161,7 @@ internal class NativeSignEngine(
             failure = SignFailureKind.NO_SESSION)
         return try {
             val json = request("activity/sign/signIn", BydProtocol.signPayload(session))
-            val ret = ResponseFields.int(json, "ret")
+            val ret = SignFailureDiagnostics.safeBusinessCode(ResponseFields.int(json, "ret"))
             if (ret == 200) {
                 SignOutcome(true, "签到成功",
                     (ResponseFields.int(json, "durationDays") ?: 0).coerceAtLeast(0))
