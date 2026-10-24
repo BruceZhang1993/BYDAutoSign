@@ -167,6 +167,9 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                     if (page == SignPage.HOME) IconButton(onClick = { page = SignPage.SETTINGS }) {
                         Icon(Icons.Outlined.Settings, contentDescription = "打开设置")
                     }
+                    IconButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = "刷新状态和记录")
+                    }
                 }
             )
         },
