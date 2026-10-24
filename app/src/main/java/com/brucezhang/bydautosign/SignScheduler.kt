@@ -1,7 +1,6 @@
 package com.brucezhang.bydautosign
 
-import android.Manifest
-import android.app.AlarmManager
+ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -53,6 +52,11 @@ internal object ScheduleTimes {
         ZonedDateTime.of(now.toLocalDate(), LocalTime.parse(requireNotNull(normalize(times)).split(',').first()), now.zone)
 }
 
+internal enum class ScheduleRecoverySource {
+    APP_START, FOREGROUND, BOOT, PACKAGE_UPDATED, TIME_CHANGED, TIMEZONE_CHANGED,
+    ALARM_PERMISSION_CHANGED, WATCHDOG, UNKNOWN
+}
+
 internal object SignScheduler {
     private const val ACTION = "com.brucezhang.bydautosign.ALARM_SIGN"
     private const val REQUEST_ID = 1077
@@ -90,26 +94,36 @@ internal object SignScheduler {
         val next = ScheduleTimes.next(store.times)
         val millis = next.toInstant().toEpochMilli()
         var scheduledExact = exactAllowed(context)
-        if (scheduledExact) {
-            try {
-                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
-            } catch (_: SecurityException) {
-                scheduledExact = false
+        val scheduled = runCatching {
+            if (scheduledExact) {
+                try {
+                    manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
+                } catch (_: SecurityException) {
+                    scheduledExact = false
+                    manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
+                }
+            } else {
+                // Revoked exact access means a non-exact wake, possibly substantially delayed.
                 manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
             }
-        } else {
-            // Android 12+/14+: the user may have denied exact-alarm special access.
-            // This still wakes in Doze, but delivery can be substantially delayed.
-            manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
+        }
+        if (scheduled.isFailure) {
+            ScheduleTelemetry(context).planned(0, false)
+            return "设置定时失败，请检查系统闹钟权限"
         }
         ScheduleTelemetry(context).planned(millis, scheduledExact)
         return "下次 ${next.format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))}" +
             if (scheduledExact) " · 精确唤醒" else " · 非精确（需授权闹钟）"
     }
 
+    /** WorkManager KEEP is the final safety net against overlapping alarms and repair passes. */
     fun enqueue(context: Context) {
         val store = SignStore(context)
         if (!store.enabled || store.signedToday()) return
+        store.automaticBlockKind()?.let {
+            ScheduleTelemetry(context).suppressed(it)
+            return
+        }
         val request = OneTimeWorkRequestBuilder<SignWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
@@ -121,11 +135,53 @@ internal object SignScheduler {
 
     fun compensate(context: Context) {
         val store = SignStore(context)
-        if (store.enabled && !store.signedToday() &&
-            !ZonedDateTime.now().isBefore(ScheduleTimes.firstToday(store.times))) {
+        val now = ZonedDateTime.now()
+        val blocked = store.automaticBlockKind(now.toInstant().toEpochMilli())
+        if (blocked != null) {
+            ScheduleTelemetry(context).suppressed(blocked)
+            return
+        }
+        if (SignRecoveryPolicy.shouldCompensate(
+                store.enabled, store.signedToday(),
+                now.toInstant().toEpochMilli(),
+                ScheduleTimes.firstToday(store.times, now).toInstant().toEpochMilli(),
+                store.lastRun
+            )) {
             ScheduleTelemetry(context).compensation()
             enqueue(context)
         }
+    }
+
+    /**
+     * Repair overdue/unknown plans on foreground resume, and re-arm on boot,
+     * time changes and watchdog ticks (exact-alarm revocation can be silent).
+     * Rescheduling never starts WeChat and never accesses a session.
+     */
+    fun recover(context: Context, source: ScheduleRecoverySource, force: Boolean = false) {
+        val store = SignStore(context)
+        val telemetry = ScheduleTelemetry(context)
+        val prior = telemetry.snapshot()
+        val now = System.currentTimeMillis()
+        val stale = store.enabled && SignRecoveryPolicy.planOverdue(prior.nextAt, now)
+        val absent = store.enabled && prior.nextAt <= 0L
+        val permissionChanged = store.enabled && prior.nextAt > 0L &&
+            SignRecoveryPolicy.permissionChanged(prior.exact, exactAllowed(context))
+        if (force || stale || absent || permissionChanged) {
+            val detail = when {
+                stale -> "overdue"
+                absent -> "missing"
+                permissionChanged -> "permission_changed"
+                else -> "rearmed"
+            }
+            runCatching {
+                val result = reschedule(context)
+                if (result.startsWith("设置定时失败")) telemetry.recoveryFailed(source.name)
+                else telemetry.recovered(source.name, detail)
+            }.onFailure {
+                telemetry.recoveryFailed(source.name)
+            }
+        }
+        compensate(context)
     }
 
     fun configure(context: Context, enabled: Boolean, times: String): String {
@@ -149,8 +205,16 @@ class SignAlarmReceiver : BroadcastReceiver() {
 
 class SignRescheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        SignScheduler.reschedule(context)
-        SignScheduler.compensate(context)
+        val source = when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED -> ScheduleRecoverySource.BOOT
+            Intent.ACTION_MY_PACKAGE_REPLACED -> ScheduleRecoverySource.PACKAGE_UPDATED
+            Intent.ACTION_TIME_CHANGED -> ScheduleRecoverySource.TIME_CHANGED
+            Intent.ACTION_TIMEZONE_CHANGED -> ScheduleRecoverySource.TIMEZONE_CHANGED
+            "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" ->
+                ScheduleRecoverySource.ALARM_PERMISSION_CHANGED
+            else -> ScheduleRecoverySource.UNKNOWN
+        }
+        SignScheduler.recover(context, source, force = true)
     }
 }
 
@@ -164,6 +228,10 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         }
         if (store.signedToday()) {
             telemetry.finished("今日已签到，跳过")
+            return@withContext Result.success()
+        }
+        store.automaticBlockKind()?.let {
+            telemetry.suppressed(it)
             return@withContext Result.success()
         }
         telemetry.started()
@@ -188,8 +256,7 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 class SignWatchdogWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         ScheduleTelemetry(applicationContext).watchdog()
-        SignScheduler.reschedule(applicationContext)
-        SignScheduler.compensate(applicationContext)
+        SignScheduler.recover(applicationContext, ScheduleRecoverySource.WATCHDOG, force = true)
         Result.success()
     }
 }

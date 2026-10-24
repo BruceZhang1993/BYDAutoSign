@@ -106,6 +106,18 @@ class SignClassificationTest {
             assertTrue(it.shouldRetry)
         }
 
+    @Test fun http408IsTransientTimeout() =
+        withResponse(MockResponse().setResponseCode(408)) {
+            assertEquals(SignFailureKind.TIMEOUT, it.failure)
+            assertTrue(it.shouldRetry)
+        }
+
+    @Test fun http429IsRetryableServerThrottling() =
+        withResponse(MockResponse().setResponseCode(429)) {
+            assertEquals(SignFailureKind.SERVER, it.failure)
+            assertTrue(it.shouldRetry)
+        }
+
     @Test fun clientFailureIsNotRetryable() =
         withResponse(MockResponse().setResponseCode(403)) {
             assertEquals(SignFailureKind.HTTP_CLIENT, it.failure)

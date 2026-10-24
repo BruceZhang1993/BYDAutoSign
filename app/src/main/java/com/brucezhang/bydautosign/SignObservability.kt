@@ -88,7 +88,13 @@ internal data class ScheduleSnapshot(
     val lastFinishAt: Long = 0,
     val lastWatchdogAt: Long = 0,
     val lastCompensateAt: Long = 0,
-    val lastState: String = "尚未运行"
+    val lastState: String = "尚未运行",
+    val lastRecoveryAt: Long = 0,
+    val lastRecoverySource: String = "",
+    val lastRecoveryDetail: String = "",
+    val lastSuppressedAt: Long = 0,
+    val lastSuppressedKind: String = "",
+    val crossDayAttempts: Int = 0
 )
 
 /** Separate scheduled, fired, enqueued and actually executed timestamps. */
@@ -111,6 +117,19 @@ internal class ScheduleTelemetry(context: Context) {
     }
     fun watchdog() { prefs.edit().putLong("watchdog", System.currentTimeMillis()).apply() }
     fun compensation() { prefs.edit().putLong("compensate", System.currentTimeMillis()).apply() }
+    fun recovered(source: String, detail: String) {
+        prefs.edit().putLong("recovery_at", System.currentTimeMillis())
+            .putString("recovery_source", source)
+            .putString("recovery_detail", detail).apply()
+    }
+    fun recoveryFailed(source: String) { recovered(source, "failed") }
+    fun suppressed(kind: SignFailureKind) {
+        prefs.edit().putLong("suppressed_at", System.currentTimeMillis())
+            .putString("suppressed_kind", kind.name).apply()
+    }
+    fun crossDayAttempt() {
+        prefs.edit().putInt("cross_day_attempts", prefs.getInt("cross_day_attempts", 0) + 1).apply()
+    }
     fun snapshot() = ScheduleSnapshot(
         nextAt = prefs.getLong("next", 0),
         exact = prefs.getBoolean("exact", false),
@@ -121,7 +140,13 @@ internal class ScheduleTelemetry(context: Context) {
         lastFinishAt = prefs.getLong("finished", 0),
         lastWatchdogAt = prefs.getLong("watchdog", 0),
         lastCompensateAt = prefs.getLong("compensate", 0),
-        lastState = prefs.getString("state", "尚未运行") ?: "尚未运行"
+        lastState = prefs.getString("state", "尚未运行") ?: "尚未运行",
+        lastRecoveryAt = prefs.getLong("recovery_at", 0),
+        lastRecoverySource = prefs.getString("recovery_source", "") ?: "",
+        lastRecoveryDetail = prefs.getString("recovery_detail", "") ?: "",
+        lastSuppressedAt = prefs.getLong("suppressed_at", 0),
+        lastSuppressedKind = prefs.getString("suppressed_kind", "") ?: "",
+        crossDayAttempts = prefs.getInt("cross_day_attempts", 0)
     )
 }
 

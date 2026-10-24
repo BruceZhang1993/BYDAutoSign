@@ -42,7 +42,8 @@ internal class SignStore(context: Context) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val bytes = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-        if (!prefs.edit().putString("session_v1", Base64.getEncoder().encodeToString(bytes)).commit()) {
+        if (!prefs.edit().putString("session_v1", Base64.getEncoder().encodeToString(bytes))
+                .remove("automatic_block_kind").remove("automatic_block_at").commit()) {
             throw IllegalStateException("会话保存失败")
         }
     }
@@ -61,9 +62,29 @@ internal class SignStore(context: Context) {
         prefs.edit().remove("session_v1").commit()
     }
 
+    /** Automatic retries should stop after nonrecoverable errors, but manual sign remains available. */
+    fun automaticBlockKind(now: Long = System.currentTimeMillis()): SignFailureKind? {
+        val kind = runCatching {
+            enumValueOf<SignFailureKind>(prefs.getString("automatic_block_kind", "") ?: "")
+        }.getOrNull() ?: return null
+        val blockedAt = prefs.getLong("automatic_block_at", 0L)
+        return kind.takeIf { SignRecoveryPolicy.isBlocked(it, blockedAt, now) }
+    }
+
+    fun markAutomaticBlock(kind: SignFailureKind, now: Long) {
+        if (SignRecoveryPolicy.blockMode(kind) == AutomaticBlockMode.NONE) return
+        prefs.edit().putString("automatic_block_kind", kind.name)
+            .putLong("automatic_block_at", now).commit()
+    }
+
+    fun clearAutomaticBlock() {
+        prefs.edit().remove("automatic_block_kind").remove("automatic_block_at").commit()
+    }
+
     var signedDate: String
         get() = prefs.getString("signed_date", "") ?: ""
-        set(value) { prefs.edit().putString("signed_date", value).apply() }
+        // Critical for idempotence: publish the completed day to disk before releasing the lock.
+        set(value) { check(prefs.edit().putString("signed_date", value).commit()) }
 
     var streak: Int
         get() = prefs.getInt("streak", 0)
@@ -86,7 +107,7 @@ internal class SignStore(context: Context) {
         get() = prefs.getBoolean("enabled", true)
         set(value) { prefs.edit().putBoolean("enabled", value).commit() }
 
-    fun signedToday() = signedDate == LocalDate.now().toString()
+    fun signedToday() = SignDatePolicy.wasSignedOn(signedDate, System.currentTimeMillis())
 
     companion object {
         private const val KEY_ALIAS = "bydautosign_session_aes_v1"
@@ -105,6 +126,13 @@ internal data class ActionResult(
 internal object SignDatePolicy {
     fun completedLocalDate(completedAt: Long, zone: ZoneId = ZoneId.systemDefault()): String =
         Instant.ofEpochMilli(completedAt).atZone(zone).toLocalDate().toString()
+
+    fun wasSignedOn(signedDate: String, now: Long, zone: ZoneId = ZoneId.systemDefault()): Boolean =
+        signedDate == completedLocalDate(now, zone)
+
+    /** Completion is the authoritative local day even if a request spans midnight. */
+    fun crossesLocalDay(startedAt: Long, completedAt: Long, zone: ZoneId = ZoneId.systemDefault()) =
+        completedLocalDate(startedAt, zone) != completedLocalDate(completedAt, zone)
 }
 
 internal object SignCoordinator {
@@ -118,6 +146,7 @@ internal object SignCoordinator {
             if (store.signedToday()) return@synchronized ActionResult(
                 true, "今日已签到，自动跳过", skipped = true
             )
+            val startedAt = System.currentTimeMillis()
             val sessionResult = runCatching { store.session() }
             val outcome = when {
                 sessionResult.isFailure -> SignOutcome(false, "本地会话不可读取，请重新授权",
@@ -131,9 +160,14 @@ internal object SignCoordinator {
             val now = System.currentTimeMillis()
             if (outcome.success) {
                 store.signedDate = SignDatePolicy.completedLocalDate(now)
+                store.clearAutomaticBlock()
                 if (!outcome.alreadySigned) store.streak = outcome.days
-            } else if (outcome.authorizationExpired) {
-                store.clearSession()
+            } else {
+                if (outcome.authorizationExpired) store.clearSession()
+                if (!outcome.shouldRetry) store.markAutomaticBlock(outcome.failure, now)
+            }
+            if (SignDatePolicy.crossesLocalDay(startedAt, now)) {
+                ScheduleTelemetry(context).crossDayAttempt()
             }
             val status = when {
                 outcome.alreadySigned -> SignRecordStatus.ALREADY_SIGNED

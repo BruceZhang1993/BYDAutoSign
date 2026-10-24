@@ -1,52 +1,113 @@
 # BYD Auto Sign
 
-纯 Android 原生自动签到应用（单 APK）。使用 LSPosed 从微信小程序**主动授权时**获取一次性 code；通过应用内 Kotlin/JCA/OkHttp 兑换 BYD session，并使用 AlarmManager + WorkManager 每日自动签到。**不需要 Root、BusyBox、crond、curl、OpenSSL 或常驻微信。**
+**Your daily BYD check-in, taken care of.**
 
-> 状态：v0.5.1 签到状态增强版。主用户原生授权、立即签到、锁屏自动签到、重启恢复与跨天复用已在当前设备完成实机验收；不同 ROM、异常网络和会话失效仍需专项验证。CI 不等同于线上业务验收。
+BYD Auto Sign is an unofficial Android app that automatically checks in to the BYD WeChat mini program for you. Authorize it once, choose your preferred times, and check your results without opening WeChat every day.
 
-## 运行前提
+**English** | [简体中文](README.zh-CN.md)
 
-- Android 8.0+；需要安装并运行微信，以及 LSPosed 提供微信小程序授权 Hook。**LSPosed 是唯一仍依赖的 Hook 环境，不再调用 su**。通常需要按 LSPosed 自身要求准备相应系统环境，但 BYD Auto Sign 本身没有 Root API。
-- 启用 BYD Auto Sign 的 LSPosed 模块并勾选微信 `com.tencent.mm`；重启微信使 Hook 生效。
-- 打开本应用，点击「初始化并授权」：经 Binder 从微信拿到短期 code，在 App 内兑换 session，并通过 Android Keystore AES-GCM 安全保存。需要网络连接。仅此操作可能主动拉起微信。
-- 在「自动调度」填写本地时间，如 `07:01` 或 `00:01,07:01,13:01,22:01`；允许最多 8 个时间，保存后由 AlarmManager 调度。
-- Android 12+ 可授予「精确闹钟」特殊权限以改善触发时效；没有授权时会降级为非精确唤醒。网络重试由 WorkManager 管理；系统的 Doze 和省电策略仍可能延迟签到。
+## Features
 
-## 迁移说明（从 v0.4.x Root 版本）
+- **Automatic daily check-ins:** Choose when to check in, with up to eight times per day.
+- **One-tap check-in:** Check in manually from the home screen.
+- **Check-in history:** See recent results and understandable failure messages.
+- **Result notifications:** Get notified after a first successful check-in or a final failure, without alerts for repeated completed check-ins.
+- **Troubleshooting tools:** View scheduling information and export a privacy-conscious diagnostic report.
+- **A clean interface:** Supports your phone's light and dark appearance.
 
-**新 APK 无法直接读取旧的 Root 私有会话。** 这是 Android 沙箱权限要求，不使用 su 就不能从 `/data/adb/byd_sign` 迁移。升级后须在 App 内通过微信重新授权一次。
+After you authorize the app, it can check in using the authorization saved on your phone. WeChat does not need to remain open.
 
-**旧 Root 签到任务并不会被 APK 自动卸载。** 如果以前安装了 byd_sign Magisk/KernelSU/APatch 模块，或残留 `/data/adb/service.d/byd_auto_sign.sh`、`/data/adb/byd_sign/cron.d/root`，请通过原有 Root 管理工具手动停用或清理，避免和新调度重复执行。新 APK 不会请求 Root 清理它们。
+## Requirements
 
-当前仅支持主 Android User 的微信 Binder 授权。旧版分身槽位的 session 不会迁移；分身/多账号将另行实现跨 User 授权。
+- An Android phone running **Android 8.0 or later**.
+- **WeChat** with access to the BYD mini program.
+- A working **LSPosed** environment.
 
-## 技术架构
+**Does it need Root?** The app does not run Root commands for daily check-ins, but setting up LSPosed may require Root or another compatible system-level solution. Installing the APK alone is not enough.
 
-- **WeChat Hook**：仅用于显式授权，DEX 动态探测 + Binder/AIDL；不暴露本地 HTTP 登录服务。
-- **NativeSignEngine**：JCA AES-128-CBC/PKCS5Padding、SHA-256 校验、OkHttp TLS 请求；服务端 session 返回后缓存，不缓存微信 code。
-- **SignStore**：AndroidKeyStore 生成 AES-GCM 本机密钥，SharedPreferences 仅保留加密密文；无 Root 目录，也不允许系统备份会话。
-- **SignScheduler**：`RTC_WAKEUP`、`setExactAndAllowWhileIdle` 或 `setAndAllowWhileIdle`；开机、升级、时区/时间/授权变化自动重建。闹钟广播入队 WorkManager（网络就绪后执行，指数退避）。
-- **SignCoordinator**：同一进程互斥，按手机本地日期幂等，今日成功后自动跳过；明确判定 session 过期时才清除。
-- **界面**：Material 3，支持系统动态色和深浅主题。
+Currently only the **main WeChat installation** is supported. Cloned WeChat apps and multiple BYD accounts are not supported yet.
 
-默认执行时间继承原版 `00:01,07:01,13:01,22:01`。目前暂无通知配置 UI 和跨 User 多账号界面。
+## Installation
 
-## 签到历史与系统通知
+1. Open [GitHub Actions](https://github.com/BruceZhang1993/BYDAutoSign/actions/workflows/android.yml) and select a successful **Android CI** run.
+2. Find **Artifacts** and download the signed APK, named `BYDAutoSign-release.apk`. You may need to sign in to GitHub.
+3. Install the APK on your Android phone. Allow installation from the selected app if Android asks.
+4. In **LSPosed**, enable the **BYD Auto Sign** module and select **WeChat** in the module's scope.
+5. Fully close and restart WeChat to apply the module.
 
-- 本地最多保留最近 **100 次实际签到尝试**（时间、手动/自动来源、成功/失败类别和重试序号）；调度诊断分别记录计划、闹钟唤醒、WorkManager 入队、执行和自检。只保存结构化状态，不记录 session、code 或服务端原文。
-- 实际签到首次成功或重试结束后最终失败发布系统通知；同日同类失败最多一次。当日已签到、本地跳过、远端提示已签到、自动重试过程 **不发布通知**。
-- Android 13+ 需在应用内「系统通知」授权 `POST_NOTIFICATIONS`；拒绝后签到照常运行，仅不展示通知。
+Upgrading from an older Root-based check-in tool? Please read [Upgrading](#upgrading) first.
 
-## 构建与交付
+## How to use
 
-需要 Android SDK 35、JDK 17；直接运行：
+### 1. Authorize once
 
-```bash
-bash ./gradlew :app:testDebugUnitTest :app:assembleDebug
-```
+Open BYD Auto Sign and tap **Initialize & Authorize** (shown as **初始化并授权** in the app). WeChat may be opened during this step. After authorization succeeds, you do not need to repeat it every day.
 
-GitHub Actions 会生成同一发布证书签名的 `BYDAutoSign-release.apk`，在 Actions → Artifacts 提供原始 APK，不会打 ZIP；参见 [签名配置](docs/RELEASE_SIGNING.md)。
+### 2. Check in now
 
-原始授权 Hook 参考 [wxcode](https://github.com/xiaojinwen/wxcode)，协议参数来自 [byd_sign](https://github.com/xiaojinwen/byd_sign)（MIT，许可保留在 `third_party/`）。BYD Auto Sign 是非官方研究项目，不代表微信或比亚迪。切勿上传 code、session_id 或未经脱敏的服务端响应。
+On the home screen, tap **Check in now** (**立即签到**) to check in manually. The home screen shows whether today's check-in is complete. If it is already complete, the app will not submit another check-in.
 
-更多信息：[路线图](docs/ROADMAP.md) · [原生架构](docs/ARCHITECTURE.md) · [测试计划](docs/TEST_PLAN.md)。
+### 3. Schedule daily check-ins
+
+Open **Settings** (**设置**), enable daily automatic check-in and enter one or more times:
+
+- `07:01` — one time each day.
+- `07:01,13:01,22:01` — multiple opportunities throughout the day.
+
+Use a 24-hour clock and commas to separate times (up to **8**). Tap **Save changes** (**保存更改**). The home screen shows the next planned time.
+
+If your phone offers **exact alarm permission**, enabling it can reduce delays. Some phones may also need fewer battery or background restrictions for reliable scheduling.
+
+### 4. View results
+
+Check today's status and recent activity on the home screen. Open **Check-in history** (**签到记录**) for past results or **Diagnostics** (**运行诊断**) to review scheduling and export a diagnostic report.
+
+Enable notification permission if you want result alerts. Disabling notifications does not disable check-ins.
+
+> Android battery-saving rules, network conditions and manufacturer restrictions may delay automatic check-ins. The app attempts to recover missed runs, but cannot promise execution at an exact minute.
+
+## Frequently asked questions
+
+**Do I need Root?**  
+Daily check-ins themselves do not use Root. A functioning LSPosed environment is still required for WeChat authorization and may require Root to set up.
+
+**Must WeChat stay running in the background?**  
+No. WeChat is needed for initial authorization or reauthorization, not for everyday scheduled check-ins.
+
+**Authorization says WeChat is not connected. What should I do?**  
+Make sure WeChat is installed, the module is enabled in LSPosed, WeChat is selected in its scope and WeChat has been fully restarted. Open WeChat once, then try authorizing again. Some WeChat versions may not yet be compatible.
+
+**Why didn't a check-in happen at exactly the scheduled time?**  
+Check that automatic check-in is enabled, a next run is shown, the network works and your phone is not blocking background activity. Grant exact alarm permission if available. Use **Diagnostics** to see the latest recorded events. Android cannot guarantee exact execution times.
+
+**Why do I need to authorize again?**  
+Saved authorization can expire or be lost after clearing app data or reinstalling. Open Settings and tap **Reauthorize** (**重新授权**). The app does not require you to type in your BYD account password.
+
+**Will I keep getting notifications if today is already complete?**  
+No. The app skips completed check-ins and does not notify you just because it retries a task. With notifications enabled, it alerts you to a first success or final failure.
+
+**Can I use cloned WeChat or multiple BYD accounts?**  
+Not at present. Support for these scenarios is planned for future versions.
+
+**Where is my authorization stored?**  
+It is encrypted on this phone. There is no cloud account sync. Do not share authentication information or unredacted logs when reporting an issue.
+
+## Upgrading
+
+If you used an earlier **Root-based** check-in setup:
+
+1. **Disable the old automatic check-in task** using your Root management tool. The new app cannot remove it automatically, and leaving both running may cause duplicate tasks.
+2. Install the new APK and **authorize again**. Old authorization data cannot be imported automatically.
+3. Confirm your preferred schedule in Settings.
+
+## Help and feedback
+
+If something goes wrong, check **Check-in history** and **Diagnostics** first. In an issue report, include your phone model, Android version, steps to reproduce and, if helpful, an **exported redacted diagnostic report**. Never post authorization tokens or raw server responses.
+
+[Report an issue](https://github.com/BruceZhang1993/BYDAutoSign/issues) · [Project roadmap](docs/ROADMAP.md)
+
+---
+
+BYD Auto Sign is an **unofficial community project** and is not affiliated with BYD or WeChat. Features rely on third-party services and may change when those services are updated.
+
+Thanks to [wxcode](https://github.com/xiaojinwen/wxcode) and [byd_sign](https://github.com/xiaojinwen/byd_sign). Licensing details: [LICENSE](LICENSE) and [third-party notices](third_party/).

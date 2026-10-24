@@ -25,7 +25,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
@@ -51,6 +54,27 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
     var times by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var notificationsAllowed by remember { mutableStateOf(SignNotifier.allowed(context)) }
+
+    // Regenerate the sanitized snapshot on result delivery: a document picker can
+    // outlive a recreated Activity, so no report payload is held in remember state.
+    val exportDocument = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val saved = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val fresh = manager.refresh()
+                        val payload = DiagnosticReport.collect(context, fresh)
+                        val out = context.contentResolver.openOutputStream(uri, "w")
+                            ?: throw IOException("cannot open document")
+                        out.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                    }.isSuccess
+                }
+                snackbars.showSnackbar(if (saved) "脱敏诊断已导出" else "导出失败，请重新选择保存位置")
+            }
+        }
+    }
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -340,6 +364,15 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                             DetailRow("最近执行结束", viewTime(trace.lastFinishAt))
                             DetailRow("执行状态", trace.lastState)
                             DetailRow("调度自检", viewTime(trace.lastWatchdogAt))
+                            DetailRow("最近调度修复", viewTime(trace.lastRecoveryAt))
+                            if (trace.lastRecoverySource.isNotBlank()) {
+                                DetailRow("修复原因", trace.lastRecoverySource + " · " + trace.lastRecoveryDetail)
+                            }
+                            if (trace.lastSuppressedAt > 0) {
+                                DetailRow("最近自动阻断", viewTime(trace.lastSuppressedAt) +
+                                    " · " + trace.lastSuppressedKind)
+                            }
+                            DetailRow("跨午夜响应次数", trace.crossDayAttempts.toString())
                         }
                     }
                     item {
@@ -356,6 +389,22 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                             OutlinedButton(enabled = !busy,
                                 onClick = { runAction { manager.reprobe() } }) {
                                 Text("重新探测微信 DEX")
+                            }
+                        }
+                    }
+                    item {
+                        OverviewHeading("诊断报告")
+                        Spacer(Modifier.height(8.dp))
+                        SectionCard {
+                            Text("导出仅包含时间、枚举错误类型、调度状态和权限摘要；不包含微信 code、BYD session、原始响应、Binder 原文或异常堆栈。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            OutlinedButton(onClick = {
+                                exportDocument.launch("byd-diagnostics-" + LocalDate.now() + ".json")
+                            }) {
+                                Icon(Icons.Outlined.FileDownload, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("导出脱敏诊断")
                             }
                         }
                     }
