@@ -29,11 +29,10 @@ BYD Auto Sign 是一款非官方的 Android 比亚迪自动签到工具。首次
 
 ## 安装方法
 
-1. 打开 [GitHub Actions 构建页面](https://github.com/BruceZhang1993/BYDAutoSign/actions/workflows/android.yml)，选择一次成功的 **Android CI** 构建。
-2. 在页面的 **Artifacts** 区域下载已签名的 `BYDAutoSign-release.apk`。下载可能需要登录 GitHub。
-3. 在手机上安装 APK。如果系统提示，请允许所用的浏览器或文件管理器安装应用。
-4. 打开 **LSPosed**，启用 **BYD Auto Sign** 模块，并在作用域中勾选**微信**。
-5. **完全关闭微信后重新打开**，使模块生效。
+1. 打开 [GitHub Releases 最新版本](https://github.com/BruceZhang1993/BYDAutoSign/releases/latest)，在 **Assets** 中下载已签名的 `BYDAutoSign-v*.apk`。
+2. 在手机上安装 APK。如果系统提示，请允许所用的浏览器或文件管理器安装应用。
+3. 打开 **LSPosed**，启用 **BYD Auto Sign** 模块，并在作用域中勾选**微信**。
+4. **完全关闭微信后重新打开**，使模块生效。
 
 如果以前用过依赖 Root 的旧版签到工具，请先看[旧版升级说明](#从旧版升级)。
 

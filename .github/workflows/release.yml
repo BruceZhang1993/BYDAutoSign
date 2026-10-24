@@ -1,0 +1,128 @@
+name: Publish GitHub Release
+
+on:
+  push:
+    branches:
+      - 'release/v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v0.5.2 (must match app versionName)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve and verify release version
+        shell: bash
+        env:
+          MANUAL_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$MANUAL_TAG"
+          else
+            tag="${GITHUB_REF_NAME#release/}"
+            git fetch origin master
+            if [[ "$(git rev-parse origin/master)" != "$GITHUB_SHA" ]]; then
+              echo "::error::Release branch must point to current master HEAD"
+              exit 1
+            fi
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid release tag: $tag"
+            exit 1
+          fi
+          version=$(sed -nE "s/^[[:space:]]*versionName[[:space:]]+'([^']+)'.*/\1/p" app/build.gradle | head -n 1)
+          if [[ "$version" != "${tag#v}" ]]; then
+            echo "::error::App versionName $version does not match release $tag"
+            exit 1
+          fi
+          if ! test -s "docs/releases/$tag.md"; then
+            echo "::error::Missing release notes docs/releases/$tag.md"
+            exit 1
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare persistent release signing key
+        env:
+          BYD_SIGNING_KEYSTORE_BASE64: ${{ secrets.BYD_SIGNING_KEYSTORE_BASE64 }}
+          BYD_SIGNING_STORE_PASSWORD: ${{ secrets.BYD_SIGNING_STORE_PASSWORD }}
+          BYD_SIGNING_KEY_ALIAS: ${{ secrets.BYD_SIGNING_KEY_ALIAS }}
+          BYD_SIGNING_KEY_PASSWORD: ${{ secrets.BYD_SIGNING_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in BYD_SIGNING_KEYSTORE_BASE64 BYD_SIGNING_STORE_PASSWORD BYD_SIGNING_KEY_ALIAS BYD_SIGNING_KEY_PASSWORD; do
+            if [[ -z "${!key}" ]]; then
+              echo "::error::Missing signing secret: $key"
+              exit 1
+            fi
+          done
+          printf '%s' "$BYD_SIGNING_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/byd-release.jks"
+          chmod 600 "$RUNNER_TEMP/byd-release.jks"
+          echo "BYD_SIGNING_STORE_FILE=$RUNNER_TEMP/byd-release.jks" >> "$GITHUB_ENV"
+
+      - name: Test and build release APK
+        env:
+          BYD_SIGNING_STORE_PASSWORD: ${{ secrets.BYD_SIGNING_STORE_PASSWORD }}
+          BYD_SIGNING_KEY_ALIAS: ${{ secrets.BYD_SIGNING_KEY_ALIAS }}
+          BYD_SIGNING_KEY_PASSWORD: ${{ secrets.BYD_SIGNING_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e app/src/main/java/com/brucezhang/bydautosign/RootBridge.kt
+          test ! -d app/src/main/assets/runtime
+          test ! -e scripts/prepare-runtime.sh
+          ! grep -R 'ProcessBuilder("su"' app/src/main/java
+          ! grep -Rq 'org.nanohttpd:nanohttpd' app/build.gradle
+          bash ./gradlew :app:testDebugUnitTest :app:assembleRelease --stacktrace
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/BYDAutoSign-$RELEASE_TAG.apk"
+          apk="dist/BYDAutoSign-$RELEASE_TAG.apk"
+          test -s "$apk"
+          apksigner=$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner | sort -V | tail -n 1)
+          test -n "$apksigner" && test -x "$apksigner"
+          "$apksigner" verify --verbose --print-certs "$apk"
+          unzip -Z1 "$apk" | grep -Fx "assets/xposed_init" >/dev/null
+          if unzip -Z1 "$apk" | grep -Eq '^(assets/runtime/|assets/bin/)'; then
+            echo "::error::Unexpected legacy Root runtime"
+            exit 1
+          fi
+          (cd dist && sha256sum "BYDAutoSign-$RELEASE_TAG.apk" > SHA256SUMS.txt)
+
+      - name: Create GitHub Release with original signed APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_TAG already exists; refusing to overwrite"
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            "dist/BYDAutoSign-$RELEASE_TAG.apk" \
+            "dist/SHA256SUMS.txt" \
+            --target "$GITHUB_SHA" \
+            --title "BYD Auto Sign $RELEASE_TAG" \
+            --notes-file "docs/releases/$RELEASE_TAG.md" \
+            --latest

@@ -29,11 +29,10 @@ Currently only the **main WeChat installation** is supported. Cloned WeChat apps
 
 ## Installation
 
-1. Open [GitHub Actions](https://github.com/BruceZhang1993/BYDAutoSign/actions/workflows/android.yml) and select a successful **Android CI** run.
-2. Find **Artifacts** and download the signed APK, named `BYDAutoSign-release.apk`. You may need to sign in to GitHub.
-3. Install the APK on your Android phone. Allow installation from the selected app if Android asks.
-4. In **LSPosed**, enable the **BYD Auto Sign** module and select **WeChat** in the module's scope.
-5. Fully close and restart WeChat to apply the module.
+1. Open the [latest GitHub Release](https://github.com/BruceZhang1993/BYDAutoSign/releases/latest) and download the signed `BYDAutoSign-v*.apk` under **Assets**.
+2. Install the APK on your Android phone. Allow installation from the selected app if Android asks.
+3. In **LSPosed**, enable the **BYD Auto Sign** module and select **WeChat** in the module's scope.
+4. Fully close and restart WeChat to apply the module.
 
 Upgrading from an older Root-based check-in tool? Please read [Upgrading](#upgrading) first.
 
