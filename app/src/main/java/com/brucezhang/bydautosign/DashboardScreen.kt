@@ -501,7 +501,7 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                         OverviewHeading("诊断报告")
                         Spacer(Modifier.height(8.dp))
                         SectionCard {
-                            Text("导出仅包含时间、枚举错误类型、调度状态和权限摘要；不包含微信 code、BYD session、原始响应、Binder 原文或异常堆栈。",
+                            Text("导出包含时间、错误分类、服务端数字错误码、安全过滤后的中文提示、调度状态和权限摘要；不包含微信 code、BYD session、原始响应、Binder 原文或异常堆栈。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             OutlinedButton(onClick = {
@@ -660,9 +660,16 @@ private fun HistoryEntryRow(entry: SignHistoryEntry) {
                     else -> "签到成功"
                 }
             } else {
-                entry.failure.label + " · 第 " + entry.attempt + " 次尝试"
+                entry.failure.label + " · 第 " + entry.attempt + " 次尝试" +
+                    (entry.businessCode?.let { " · ret=$it" } ?: "") +
+                    (entry.httpStatus?.let { " · HTTP $it" } ?: "")
             }, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!success && entry.serverMessage != null) {
+                Text("服务端提示：" + entry.serverMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         Text(viewTime(entry.timestamp, true),
             style = MaterialTheme.typography.labelSmall,

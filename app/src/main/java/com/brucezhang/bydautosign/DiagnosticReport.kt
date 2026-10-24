@@ -28,12 +28,22 @@ internal object DiagnosticReport {
         val trace = state.scheduleTrace
         val attempts = JSONArray()
         state.history.take(100).forEach { entry ->
-            attempts.put(JSONObject()
+            val item = JSONObject()
                 .put("timestampMs", entry.timestamp)
                 .put("origin", entry.origin.name)
                 .put("status", entry.status.name)
                 .put("failure", entry.failure.name)
-                .put("attempt", entry.attempt.coerceIn(1, 20)))
+                .put("attempt", entry.attempt.coerceIn(1, 20))
+            SignFailureDiagnostics.safeBusinessCode(entry.businessCode)?.let {
+                item.put("businessCode", it)
+            }
+            SignFailureDiagnostics.safeServerMessage(entry.serverMessage)?.let {
+                item.put("serverMessage", it)
+            }
+            SignFailureDiagnostics.safeHttpStatus(entry.httpStatus)?.let {
+                item.put("httpStatus", it)
+            }
+            attempts.put(item)
         }
         val wakeups = JSONArray()
         state.scheduleEvents.take(100).forEach { event ->
@@ -44,7 +54,7 @@ internal object DiagnosticReport {
                 .put("failure", event.failure.name))
         }
         val report = JSONObject()
-            .put("schema", 2)
+            .put("schema", 3)
             .put("generatedAtUtc", Instant.ofEpochMilli(generatedAt).toString())
             .put("appVersion", appVersion)
             .put("androidApi", sdk)

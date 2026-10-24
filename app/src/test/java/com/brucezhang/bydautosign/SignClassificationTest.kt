@@ -97,7 +97,37 @@ class SignClassificationTest {
             assertFalse(it.success)
             assertFalse(it.authorizationExpired)
             assertEquals(SignFailureKind.BUSINESS, it.failure)
+            assertEquals(412, it.businessCode)
+            assertTrue(it.message.contains("ret=412"))
             assertFalse(it.message.contains("secret_token_123"))
+            assertEquals(null, it.serverMessage)
+        }
+
+    @Test fun businessErrorKeepsSafeChineseDetailsAndReturnCode() =
+        withResponse(json("""{"ret":423,"msg":"账号状态异常，请联系客服"}""")) {
+            assertEquals(SignFailureKind.BUSINESS, it.failure)
+            assertEquals(423, it.businessCode)
+            assertEquals("账号状态异常，请联系客服", it.serverMessage)
+            assertTrue(it.message.contains("ret=423"))
+            assertTrue(it.message.contains("账号状态异常"))
+        }
+
+    @Test fun chineseSessionExpiryRequestsReauthorization() =
+        withResponse(json("""{"ret":401,"msg":"登录状态已失效，请重新登录"}""")) {
+            assertEquals(SignFailureKind.AUTH_EXPIRED, it.failure)
+            assertTrue(it.authorizationExpired)
+            assertEquals(401, it.businessCode)
+            assertFalse(it.shouldRetry)
+        }
+
+    @Test fun safeErrorDetailsRejectSecretsAndPersonalNumbers() {
+        assertEquals(null, SignFailureDiagnostics.safeServerMessage("session_id:ABC123SECRET"))
+        assertEquals(null, SignFailureDiagnostics.safeServerMessage("手机号13812345678"))
+        assertEquals(null, SignFailureDiagnostics.safeServerMessage("token\nabc-def-xyz"))
+        assertEquals("服务暂不可用", SignFailureDiagnostics.safeServerMessage("服务暂不可用"))
+        assertEquals(null, SignFailureDiagnostics.safeBusinessCode(Int.MAX_VALUE))
+        assertEquals(null, SignFailureDiagnostics.safeHttpStatus(900))
+        assertEquals(403, SignFailureDiagnostics.safeHttpStatus(403))
         }
 
     @Test fun serverFailureIsRetryable() =
@@ -121,6 +151,8 @@ class SignClassificationTest {
     @Test fun clientFailureIsNotRetryable() =
         withResponse(MockResponse().setResponseCode(403)) {
             assertEquals(SignFailureKind.HTTP_CLIENT, it.failure)
+            assertEquals(403, it.httpStatus)
+            assertTrue(it.message.contains("HTTP 403"))
             assertFalse(it.shouldRetry)
         }
 

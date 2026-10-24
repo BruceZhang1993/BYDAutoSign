@@ -14,12 +14,27 @@ import org.json.JSONObject
 import java.time.LocalDate
 import java.time.ZoneId
 
-/** Never persist raw service messages, codes, session IDs, or exception text. */
+/** Never persist raw responses, credentials, or unfiltered exception text. */
 internal enum class SignFailureKind(val label: String) {
     NONE("无"), NO_SESSION("未授权"), SESSION_UNREADABLE("本地会话异常"),
     AUTH_EXPIRED("会话过期"), NETWORK("网络异常"), TIMEOUT("请求超时"),
     TLS("TLS 验证失败"), SERVER("服务端异常"), HTTP_CLIENT("请求被拒绝"),
     PROTOCOL("协议或响应异常"), BUSINESS("业务失败"), UNKNOWN("未知错误")
+}
+/** Never retain arbitrary backend text: persist only short, Chinese-language
+ * human-readable descriptions without digits, Latin tokens, or control chars.
+ * Numeric ret/HTTP status are recorded separately. Raw response is discarded. */
+internal object SignFailureDiagnostics {
+    fun safeBusinessCode(value: Int?): Int? = value?.takeIf { it in -999999..999999 }
+    fun safeHttpStatus(value: Int?): Int? = value?.takeIf { it in 100..599 }
+
+    fun safeServerMessage(raw: String?): String? {
+        val text = raw?.trim()?.replace(Regex("\\s+"), " ") ?: return null
+        if (text.length !in 1..100) return null
+        val punctuation = " ，。！？…、；：,.:!?-（）()【】《》·"
+        if (text.any { it !in '\u3400'..'\u9fff' && it !in punctuation }) return null
+        return text
+    }
 }
 internal enum class SignOrigin(val label: String) {
     MANUAL("手动"), SCHEDULED("自动"), RESTORED("历史补录")
@@ -32,7 +47,10 @@ internal data class SignHistoryEntry(
     val origin: SignOrigin,
     val status: SignRecordStatus,
     val failure: SignFailureKind,
-    val attempt: Int = 1
+    val attempt: Int = 1,
+    val businessCode: Int? = null,
+    val serverMessage: String? = null,
+    val httpStatus: Int? = null
 )
 
 /** Only reconstruct a known completed request from a persisted timestamp; never
@@ -54,7 +72,7 @@ internal object SignHistoryRecovery {
     }
 }
 
-/** Bounded private history; only enums, timestamps and attempt counts are recorded. */
+/** Bounded private history; only typed codes and sanitized messages are persisted. */
 internal class SignHistory(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("byd_sign_history", Context.MODE_PRIVATE)
 
@@ -69,7 +87,13 @@ internal class SignHistory(context: Context) {
                     enumValueOf<SignOrigin>(item.getString("origin")),
                     enumValueOf<SignRecordStatus>(item.getString("status")),
                     enumValueOf<SignFailureKind>(item.getString("error")),
-                    item.optInt("attempt", 1)
+                    item.optInt("attempt", 1),
+                    if (item.has("businessCode")) SignFailureDiagnostics.safeBusinessCode(
+                        item.optInt("businessCode")) else null,
+                    SignFailureDiagnostics.safeServerMessage(
+                        item.optString("serverMessage", "")),
+                    if (item.has("httpStatus")) SignFailureDiagnostics.safeHttpStatus(
+                        item.optInt("httpStatus")) else null
                 )
             } catch (_: Exception) { null }
         }
@@ -82,23 +106,28 @@ internal class SignHistory(context: Context) {
         }
 
     fun append(entry: SignHistoryEntry) = synchronized(monitor) {
-        val array = JSONArray()
-        array.put(JSONObject()
-            .put("at", entry.timestamp)
-            .put("origin", entry.origin.name)
-            .put("status", entry.status.name)
-            .put("error", entry.failure.name)
-            .put("attempt", entry.attempt.coerceIn(1, 20)))
-        list().take(MAX_ENTRIES - 1).forEach { previous ->
-            array.put(JSONObject()
-                .put("at", previous.timestamp)
-                .put("origin", previous.origin.name)
-                .put("status", previous.status.name)
-                .put("error", previous.failure.name)
-                .put("attempt", previous.attempt))
-        }
+        val array = JSONArray().put(serialize(entry))
+        list().take(MAX_ENTRIES - 1).forEach { previous -> array.put(serialize(previous)) }
         check(prefs.edit().putString("entries", array.toString()).commit()) { "无法保存签到历史" }
     }
+
+    private fun serialize(entry: SignHistoryEntry): JSONObject = JSONObject()
+        .put("at", entry.timestamp)
+        .put("origin", entry.origin.name)
+        .put("status", entry.status.name)
+        .put("error", entry.failure.name)
+        .put("attempt", entry.attempt.coerceIn(1, 20))
+        .apply {
+            SignFailureDiagnostics.safeBusinessCode(entry.businessCode)?.let {
+                put("businessCode", it)
+            }
+            SignFailureDiagnostics.safeServerMessage(entry.serverMessage)?.let {
+                put("serverMessage", it)
+            }
+            SignFailureDiagnostics.safeHttpStatus(entry.httpStatus)?.let {
+                put("httpStatus", it)
+            }
+        }
 
     private companion object {
         const val MAX_ENTRIES = 100
