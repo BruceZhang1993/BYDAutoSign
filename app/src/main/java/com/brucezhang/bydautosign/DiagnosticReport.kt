@@ -41,7 +41,11 @@ internal object DiagnosticReport {
                 .put("timestampMs", event.timestamp)
                 .put("type", event.type.name)
                 .put("source", event.source.name)
-                .put("failure", event.failure.name))
+                .put("failure", event.failure.name)
+                .put("plannedAtMs", event.plannedAt.coerceAtLeast(0L))
+                .put("slot", ScheduleTimes.normalize(event.slot)?.takeIf {
+                    !it.contains(',')
+                } ?: ""))
         }
         val report = JSONObject()
             .put("schema", 2)

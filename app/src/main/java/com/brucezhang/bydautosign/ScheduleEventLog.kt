@@ -7,6 +7,8 @@ import org.json.JSONObject
 /** A schedule wake-up is not a sign request; track it separately from SignHistory. */
 internal enum class ScheduleEventType(val label: String) {
     ALARM_FIRED("定时闹钟已触发"),
+    MISSED_WAKE("计划时间未收到闹钟唤醒"),
+    SCHEDULE_FAILED("闹钟注册失败"),
     WORK_QUEUED("签到任务已提交"),
     SKIPPED_SIGNED("今日已签到，跳过"),
     SKIPPED_DISABLED("自动签到已关闭，跳过"),
@@ -19,12 +21,16 @@ internal data class ScheduleEventEntry(
     val timestamp: Long,
     val type: ScheduleEventType,
     val source: ScheduleEventSource,
-    val failure: SignFailureKind = SignFailureKind.NONE
+    val failure: SignFailureKind = SignFailureKind.NONE,
+    val plannedAt: Long = 0,
+    val slot: String = ""
 )
 
 /** Strict enum-only serialization: never persist service responses or session values. */
 internal object ScheduleEventCodec {
     private const val LIMIT = 100
+    private fun safeSlot(value: String): String =
+        value.takeIf { ScheduleTimes.normalize(it) == it && !it.contains(',') } ?: ""
     fun decode(raw: String): List<ScheduleEventEntry> {
         val array = runCatching { JSONArray(raw) }.getOrElse { return emptyList() }
         return (0 until array.length()).mapNotNull { i ->
@@ -34,7 +40,9 @@ internal object ScheduleEventCodec {
                     timestamp = item.getLong("at"),
                     type = enumValueOf<ScheduleEventType>(item.getString("type")),
                     source = enumValueOf<ScheduleEventSource>(item.getString("source")),
-                    failure = enumValueOf<SignFailureKind>(item.optString("failure", "NONE"))
+                    failure = enumValueOf<SignFailureKind>(item.optString("failure", "NONE")),
+                    plannedAt = item.optLong("plannedAt", 0L),
+                    slot = safeSlot(item.optString("slot", ""))
                 )
             }.getOrNull()
         }.take(LIMIT)
@@ -47,7 +55,9 @@ internal object ScheduleEventCodec {
                 .put("at", event.timestamp)
                 .put("type", event.type.name)
                 .put("source", event.source.name)
-                .put("failure", event.failure.name))
+                .put("failure", event.failure.name)
+                .put("plannedAt", event.plannedAt.coerceAtLeast(0L))
+                .put("slot", safeSlot(event.slot)))
         }
         return array.toString()
     }
@@ -66,9 +76,11 @@ internal class ScheduleEventLog(context: Context) {
     }
 
     fun append(type: ScheduleEventType, source: ScheduleEventSource,
-               failure: SignFailureKind = SignFailureKind.NONE) = synchronized(monitor) {
+               failure: SignFailureKind = SignFailureKind.NONE,
+               plannedAt: Long = 0L, slot: String = "") = synchronized(monitor) {
         val next = ScheduleEventCodec.add(list(),
-            ScheduleEventEntry(System.currentTimeMillis(), type, source, failure))
+            ScheduleEventEntry(System.currentTimeMillis(), type, source, failure,
+                plannedAt, slot))
         check(prefs.edit().putString("entries", ScheduleEventCodec.encode(next)).commit()) {
             "无法保存调度记录"
         }

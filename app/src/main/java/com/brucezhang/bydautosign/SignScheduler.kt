@@ -48,6 +48,14 @@ internal object ScheduleTimes {
         }.first { it.isAfter(now) }
     }
 
+    /** Each configured time owns an independent daily alarm, even if another slot is missed. */
+    fun nextForSlot(slot: String, now: ZonedDateTime = ZonedDateTime.now()): ZonedDateTime {
+        require(normalize(slot) == slot && !slot.contains(','))
+        val today = ZonedDateTime.of(now.toLocalDate(), LocalTime.parse(slot), now.zone)
+        return if (today.isAfter(now)) today
+            else ZonedDateTime.of(now.toLocalDate().plusDays(1), LocalTime.parse(slot), now.zone)
+    }
+
     fun firstToday(times: String, now: ZonedDateTime = ZonedDateTime.now()): ZonedDateTime =
         ZonedDateTime.of(now.toLocalDate(), LocalTime.parse(requireNotNull(normalize(times)).split(',').first()), now.zone)
 }
@@ -59,12 +67,35 @@ internal enum class ScheduleRecoverySource {
 
 internal object SignScheduler {
     private const val ACTION = "com.brucezhang.bydautosign.ALARM_SIGN"
-    private const val REQUEST_ID = 1077
+    // Old releases used a single pending broadcast, so cancel that identity on migration.
+    private const val LEGACY_REQUEST_ID = 1077
+    private const val SLOT_REQUEST_BASE = 20000
+    private const val EXTRA_SLOT = "scheduled_slot"
+    private const val EXTRA_EXPECTED_AT = "expected_at"
     private const val WORK_NAME = "native-daily-sign"
     private const val WATCHDOG_NAME = "native-alarm-watchdog"
 
-    private fun intent(context: Context): PendingIntent = PendingIntent.getBroadcast(
-        context, REQUEST_ID, Intent(context, SignAlarmReceiver::class.java).setAction(ACTION),
+    private fun slots(times: String): List<String> =
+        ScheduleTimes.normalize(times)?.split(',') ?: emptyList()
+
+    /** Stable, collision-free PendingIntent identity for all 1440 possible HH:mm slots. */
+    internal fun slotRequestCode(slot: String): Int {
+        require(ScheduleTimes.normalize(slot) == slot && !slot.contains(','))
+        val time = LocalTime.parse(slot)
+        return SLOT_REQUEST_BASE + time.hour * 60 + time.minute
+    }
+
+    private fun intent(context: Context, slot: String, expectedAt: Long = 0): PendingIntent =
+        PendingIntent.getBroadcast(
+            context, slotRequestCode(slot),
+            Intent(context, SignAlarmReceiver::class.java)
+                .setAction(ACTION).putExtra(EXTRA_SLOT, slot)
+                .putExtra(EXTRA_EXPECTED_AT, expectedAt),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+    private fun legacyIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
+        context, LEGACY_REQUEST_ID, Intent(context, SignAlarmReceiver::class.java).setAction(ACTION),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
@@ -73,47 +104,120 @@ internal object SignScheduler {
         return Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms()
     }
 
+    /** Set one OS alarm, using the inexact fallback if exact-alarm access was revoked. */
+    private fun arm(manager: AlarmManager, context: Context, slot: String,
+                    next: ZonedDateTime): Boolean {
+        val at = next.toInstant().toEpochMilli()
+        val alarm = intent(context, slot, at)
+        if (exactAllowed(context)) {
+            try {
+                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, alarm)
+                return true
+            } catch (_: SecurityException) {
+                // Permission can be revoked between the query and the scheduling call.
+            }
+        }
+        manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, alarm)
+        return false
+    }
+
+    /**
+     * Register every time independently. A missing 00:01 broadcast must never
+     * prevent 06:15, 13:01 or 18:01 from already being registered with Android.
+     */
     @Synchronized
-    fun reschedule(context: Context): String {
+    fun reschedule(context: Context, previousTimes: String? = null): String {
         val store = SignStore(context)
         val manager = context.getSystemService(AlarmManager::class.java)
-        val alarm = intent(context)
-        manager.cancel(alarm)
+        manager.cancel(legacyIntent(context))
+        (slots(previousTimes ?: store.times) + slots(store.times)).distinct().forEach { slot ->
+            manager.cancel(intent(context, slot))
+        }
         if (!store.enabled) {
             WorkManager.getInstance(context).cancelUniqueWork(WATCHDOG_NAME)
             ScheduleTelemetry(context).planned(0, false)
             return "自动签到已关闭"
         }
-        // If an Android 12+ exact-alarm grant is revoked, existing alarms may
-        // be canceled silently. Periodic WorkManager is a delayed safety net.
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             WATCHDOG_NAME,
             ExistingPeriodicWorkPolicy.KEEP,
             PeriodicWorkRequestBuilder<SignWatchdogWorker>(12, TimeUnit.HOURS).build()
         )
-        val next = ScheduleTimes.next(store.times)
-        val millis = next.toInstant().toEpochMilli()
-        var scheduledExact = exactAllowed(context)
+        val now = ZonedDateTime.now()
+        val next = ScheduleTimes.next(store.times, now)
+        var allExact = true
         val scheduled = runCatching {
-            if (scheduledExact) {
-                try {
-                    manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
-                } catch (_: SecurityException) {
-                    scheduledExact = false
-                    manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
-                }
-            } else {
-                // Revoked exact access means a non-exact wake, possibly substantially delayed.
-                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, millis, alarm)
+            slots(store.times).forEach { slot ->
+                val exact = arm(manager, context, slot, ScheduleTimes.nextForSlot(slot, now))
+                allExact = allExact && exact
             }
         }
         if (scheduled.isFailure) {
             ScheduleTelemetry(context).planned(0, false)
+            runCatching { ScheduleEventLog(context).append(
+                ScheduleEventType.SCHEDULE_FAILED, ScheduleEventSource.COMPENSATION) }
             return "设置定时失败，请检查系统闹钟权限"
         }
-        ScheduleTelemetry(context).planned(millis, scheduledExact)
+        ScheduleTelemetry(context).planned(next.toInstant().toEpochMilli(), allExact)
         return "下次 ${next.format(DateTimeFormatter.ofPattern("MM-dd HH:mm"))}" +
-            if (scheduledExact) " · 精确唤醒" else " · 非精确（需授权闹钟）"
+            if (allExact) " · 精确唤醒" else " · 非精确（需授权闹钟）"
+    }
+
+    /** Re-arm only the fired slot; never cancel another slot awaiting delivery. */
+    @Synchronized
+    fun onAlarm(context: Context, received: Intent) {
+        val store = SignStore(context)
+        val slot = received.getStringExtra(EXTRA_SLOT)
+        val valid = slot != null && slot in slots(store.times)
+        val expectedAt = received.getLongExtra(EXTRA_EXPECTED_AT, 0L)
+        val telemetry = ScheduleTelemetry(context)
+        telemetry.alarmFired(expectedAt)
+        runCatching { ScheduleEventLog(context).append(
+            ScheduleEventType.ALARM_FIRED, ScheduleEventSource.ALARM,
+            plannedAt = expectedAt, slot = if (valid) slot!! else "") }
+        if (valid && store.enabled) {
+            val next = ZonedDateTime.now()
+            val result = runCatching {
+                arm(context.getSystemService(AlarmManager::class.java),
+                    context, slot!!, ScheduleTimes.nextForSlot(slot, next))
+            }
+            if (result.isFailure) {
+                telemetry.planned(0, false)
+                runCatching { ScheduleEventLog(context).append(
+                    ScheduleEventType.SCHEDULE_FAILED, ScheduleEventSource.ALARM, slot = slot!!) }
+            } else {
+                // Snapshot is a display/repair hint; the independent alarms are the actual schedule.
+                telemetry.planned(ScheduleTimes.next(store.times, next).toInstant().toEpochMilli(),
+                    exactAllowed(context) && result.getOrDefault(false))
+            }
+        } else if (slot == null) {
+            // Legacy PendingIntent from the single-alarm implementation.
+            reschedule(context)
+        } else if (!store.enabled) {
+            runCatching { ScheduleEventLog(context).append(
+                ScheduleEventType.SKIPPED_DISABLED, ScheduleEventSource.ALARM, slot = slot ?: "") }
+            return
+        } else {
+            // An outdated slot from a concurrent settings change must not sign.
+            reschedule(context)
+            return
+        }
+        enqueue(context, ScheduleEventSource.ALARM)
+    }
+
+    /** Emit an explicit diagnostic when a planned wake is overdue without a receiver. */
+    private fun recordMissedWake(context: Context, snapshot: ScheduleSnapshot, now: Long) {
+        if (!SignRecoveryPolicy.planOverdue(snapshot.nextAt, now) ||
+            snapshot.lastAlarmAt >= snapshot.nextAt) return
+        runCatching {
+            val log = ScheduleEventLog(context)
+            if (log.list().none {
+                    it.type == ScheduleEventType.MISSED_WAKE && it.plannedAt == snapshot.nextAt
+                }) {
+                log.append(ScheduleEventType.MISSED_WAKE, ScheduleEventSource.COMPENSATION,
+                    plannedAt = snapshot.nextAt)
+            }
+        }
     }
 
     /** WorkManager KEEP is the final safety net against overlapping alarms and repair passes. */
@@ -176,6 +280,7 @@ internal object SignScheduler {
         val absent = store.enabled && prior.nextAt <= 0L
         val permissionChanged = store.enabled && prior.nextAt > 0L &&
             SignRecoveryPolicy.permissionChanged(prior.exact, exactAllowed(context))
+        if (store.enabled && stale) recordMissedWake(context, prior, now)
         if (force || stale || absent || permissionChanged) {
             val detail = when {
                 stale -> "overdue"
@@ -197,21 +302,18 @@ internal object SignScheduler {
     fun configure(context: Context, enabled: Boolean, times: String): String {
         val normalized = ScheduleTimes.normalize(times) ?: return "时间格式无效，请使用 HH:mm，逗号分隔（最多8组）"
         val store = SignStore(context)
+        val previousTimes = store.times
         store.times = normalized
         store.enabled = enabled
         if (!enabled) WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
-        return reschedule(context)
+        return reschedule(context, previousTimes)
     }
 }
 
 /** Manifest receiver is allowed to enqueue durable work; network work is never run inside onReceive. */
 class SignAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        ScheduleTelemetry(context).alarmFired()
-        runCatching { ScheduleEventLog(context).append(
-            ScheduleEventType.ALARM_FIRED, ScheduleEventSource.ALARM) }
-        SignScheduler.reschedule(context)
-        SignScheduler.enqueue(context, ScheduleEventSource.ALARM)
+        SignScheduler.onAlarm(context, intent)
     }
 }
 

@@ -677,13 +677,28 @@ private fun ScheduleEventRow(event: ScheduleEventEntry) {
         event.type == ScheduleEventType.SKIPPED_DISABLED
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Icon(if (skipped) Icons.Outlined.DoNotDisturbOn else Icons.Outlined.Schedule,
-            contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        val warning = event.type == ScheduleEventType.MISSED_WAKE ||
+            event.type == ScheduleEventType.SCHEDULE_FAILED
+        Icon(when {
+            warning -> Icons.Outlined.ErrorOutline
+            skipped -> Icons.Outlined.DoNotDisturbOn
+            else -> Icons.Outlined.Schedule
+        }, contentDescription = null,
+            tint = if (warning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
         Column(modifier = Modifier.weight(1f)) {
             Text(event.type.label, style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium)
-            Text(event.source.label +
-                if (event.type == ScheduleEventType.SKIPPED_BLOCKED) " · ${event.failure.label}" else "",
+            val detail = buildString {
+                append(event.source.label)
+                if (event.slot.isNotBlank()) append(" · ").append(event.slot)
+                if (event.type == ScheduleEventType.MISSED_WAKE && event.plannedAt > 0L) {
+                    append(" · 计划 ").append(viewTime(event.plannedAt))
+                }
+                if (event.type == ScheduleEventType.SKIPPED_BLOCKED) {
+                    append(" · ").append(event.failure.label)
+                }
+            }
+            Text(detail,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

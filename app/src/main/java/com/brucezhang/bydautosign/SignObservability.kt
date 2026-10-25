@@ -131,9 +131,9 @@ internal class ScheduleTelemetry(context: Context) {
     fun planned(next: Long, exact: Boolean) {
         prefs.edit().putLong("next", next).putBoolean("exact", exact).apply()
     }
-    fun alarmFired() {
+    fun alarmFired(expectedAt: Long = 0L) {
         val now = System.currentTimeMillis()
-        val planned = prefs.getLong("next", 0)
+        val planned = if (expectedAt > 0L) expectedAt else prefs.getLong("next", 0)
         prefs.edit().putLong("alarm", now)
             .putLong("delay", if (planned > 0) (now - planned).coerceAtLeast(0) else 0).apply()
     }

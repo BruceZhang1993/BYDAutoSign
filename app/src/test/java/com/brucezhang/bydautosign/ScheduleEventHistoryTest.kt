@@ -9,6 +9,40 @@ import java.time.LocalDate
 import java.time.ZoneId
 
 class ScheduleEventHistoryTest {
+    @Test fun eachClockSlotUsesDistinctStableAlarmRequestCode() {
+        assertEquals(20001, SignScheduler.slotRequestCode("00:01"))
+        assertEquals(20375, SignScheduler.slotRequestCode("06:15"))
+        assertEquals(20781, SignScheduler.slotRequestCode("13:01"))
+        assertEquals(21081, SignScheduler.slotRequestCode("18:01"))
+        assertFalse(SignScheduler.slotRequestCode("06:15") ==
+            SignScheduler.slotRequestCode("13:01"))
+    }
+
+    @Test fun eachClockSlotSchedulesNextDayWithoutWaitingForEarlierSlotToFire() {
+        val now = LocalDate.of(2026, 10, 25).atTime(14, 46)
+            .atZone(ZoneId.of("Asia/Shanghai"))
+        val last = ScheduleTimes.nextForSlot("18:01", now)
+        val missed = ScheduleTimes.nextForSlot("06:15", now)
+        assertEquals(now.toLocalDate(), last.toLocalDate())
+        assertEquals(now.toLocalDate().plusDays(1), missed.toLocalDate())
+        assertEquals("18:01", last.toLocalTime().toString())
+        assertEquals("06:15", missed.toLocalTime().toString())
+    }
+
+    @Test fun missedWakePersistsPlannedTimeAndSlotWithoutBreakingOldRecords() {
+        val missed = ScheduleEventEntry(3000L, ScheduleEventType.MISSED_WAKE,
+            ScheduleEventSource.COMPENSATION, plannedAt = 2000L)
+        val alarm = ScheduleEventEntry(4000L, ScheduleEventType.ALARM_FIRED,
+            ScheduleEventSource.ALARM, plannedAt = 3900L, slot = "06:15")
+        val decoded = ScheduleEventCodec.decode(ScheduleEventCodec.encode(listOf(missed, alarm)))
+        assertEquals(2000L, decoded[0].plannedAt)
+        assertEquals("06:15", decoded[1].slot)
+        val legacy = ScheduleEventCodec.decode(
+            """[{"at":1000,"type":"ALARM_FIRED","source":"ALARM"}]""")
+        assertEquals(0L, legacy.single().plannedAt)
+        assertEquals("", legacy.single().slot)
+    }
+
     @Test fun alarmAndAlreadySignedSkipAreSeparateFromSuccessfulSign() {
         val events = ScheduleEventCodec.add(
             listOf(ScheduleEventEntry(1000L, ScheduleEventType.ALARM_FIRED,
