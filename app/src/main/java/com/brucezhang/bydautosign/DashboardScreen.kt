@@ -538,6 +538,15 @@ private fun TodaySummary(
                     Text(statusTitle, style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.SemiBold, color = fg)
                     Text(statusDetail, style = MaterialTheme.typography.bodyMedium, color = fg)
+                    // Keep the stage visible with the latest failed scheduled sign,
+                    // without scrolling down to the authorization section.
+                    val latest = state.history.firstOrNull()
+                    if (latestFailureToday && latest?.origin == SignOrigin.SCHEDULED &&
+                        state.autoRefreshAt > 0L && state.autoRefreshAt <= latest.timestamp &&
+                        latest.timestamp - state.autoRefreshAt < 180_000L) {
+                        Text(state.authorizationRefresh,
+                            style = MaterialTheme.typography.bodySmall, color = fg)
+                    }
                 }
             }
             HorizontalDivider(color = fg.copy(alpha = 0.18f))
