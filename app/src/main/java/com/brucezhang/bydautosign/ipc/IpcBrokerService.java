@@ -184,9 +184,9 @@ public final class IpcBrokerService extends Service {
     }
 
     /**
-     * Local-only API, invoked from BYDAutoSign's explicit authorization UI
-     * on a worker thread. No public Binder method allows arbitrary clients
-     * to trigger a login.
+     * Local-only API, invoked from the app's manual authorization or opted-in
+     * scheduled refresh on a worker thread. External apps cannot use this
+     * internal method to trigger a login.
      */
     public static CodeResult obtainCode(String appId) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
