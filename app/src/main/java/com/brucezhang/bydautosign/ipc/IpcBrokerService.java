@@ -9,6 +9,7 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.Looper;
+import android.os.SystemClock;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -23,6 +24,12 @@ public final class IpcBrokerService extends Service {
     public static final int PROTOCOL_VERSION = 1;
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static volatile IpcBrokerService running;
+    // The hook may be rebinding at the exact time a scheduled worker starts.
+    private static final Object connectionMonitor = new Object();
+
+    private static void signalConnectionChanged() {
+        synchronized (connectionMonitor) { connectionMonitor.notifyAll(); }
+    }
 
     private final Object lock = new Object();
     private IHookEndpoint endpoint;
@@ -52,6 +59,7 @@ public final class IpcBrokerService extends Service {
                 registeredUid = uid;
                 deathRecipient = recipient;
             }
+            signalConnectionChanged();
         }
 
         @Override
@@ -86,12 +94,14 @@ public final class IpcBrokerService extends Service {
         endpoint = null;
         deathRecipient = null;
         registeredUid = -1;
+        signalConnectionChanged();
     }
 
     @Override
     public void onCreate() {
         super.onCreate();
         running = this;
+        signalConnectionChanged();
     }
 
     @Override
@@ -105,6 +115,7 @@ public final class IpcBrokerService extends Service {
     public void onDestroy() {
         synchronized (lock) { forgetLocked(); }
         running = null;
+        signalConnectionChanged();
         super.onDestroy();
     }
 
@@ -217,6 +228,30 @@ public final class IpcBrokerService extends Service {
         } catch (RemoteException | SecurityException remoteError) {
             return new CodeResult(-605, "");
         }
+    }
+
+    /**
+     * Allow a bounded grace period for the existing WeChat Hook to reconnect.
+     * This does NOT start WeChat, invoke Root, or hold the service alive.
+     * Always call from a worker thread, never the main thread.
+     */
+    public static boolean awaitConnected(long timeoutMillis) {
+        if (connected()) return true;
+        if (Looper.myLooper() == Looper.getMainLooper()) return false;
+        long remaining = Math.max(0L, Math.min(timeoutMillis, 20_000L));
+        long deadline = SystemClock.elapsedRealtime() + remaining;
+        synchronized (connectionMonitor) {
+            while (!connected() && remaining > 0) {
+                try {
+                    connectionMonitor.wait(remaining);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+                remaining = deadline - SystemClock.elapsedRealtime();
+            }
+        }
+        return connected();
     }
 
     public static boolean connected() {
