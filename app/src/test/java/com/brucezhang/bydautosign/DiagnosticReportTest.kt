@@ -16,7 +16,7 @@ class DiagnosticReportTest {
             lastResult = "server:" + secret,
             connected = true,
             sessionReady = true,
-            times = "07:01,22:01",
+            times = "07:01",
             enabled = true,
             signedToday = false,
             history = listOf(SignHistoryEntry(1000L, SignOrigin.SCHEDULED,
@@ -48,7 +48,7 @@ class DiagnosticReportTest {
         assertEquals("ALARM", events.getJSONObject(0).getString("source"))
         assertEquals(1, json.getJSONObject("sign").getInt("scheduleEventCount"))
         val sched = json.getJSONObject("schedule")
-        assertEquals("07:01,22:01", sched.getString("times"))
+        assertEquals("07:01", sched.getString("times"))
         assertEquals("FAILED", sched.getString("workerState"))
         assertEquals("UNKNOWN", sched.getString("recoverySource"))
         assertEquals("unknown", sched.getString("recoveryResult"))
