@@ -53,6 +53,7 @@ internal data class NativeUiState(
     val hookInfo: String = "",
     val sessionReady: Boolean = false,
     val sessionError: String = "",
+    val authorizationRefresh: String = "",
     val enabled: Boolean = true,
     val times: String = "",
     val exact: Boolean = false,
@@ -102,6 +103,10 @@ internal class NativeSignManager(private val context: android.content.Context) {
                     "会话已过期，请重新授权；自动重试仍会按计划运行"
                 else -> ""
             },
+            authorizationRefresh = if (store.lastAutoRefreshAt > 0L)
+                "最近自动刷新：${store.lastAutoRefreshStatus.label} · " +
+                    formatDateTime(store.lastAutoRefreshAt)
+            else "等待首次自动刷新",
             enabled = store.enabled,
             times = store.times,
             exact = SignScheduler.exactAllowed(context),
