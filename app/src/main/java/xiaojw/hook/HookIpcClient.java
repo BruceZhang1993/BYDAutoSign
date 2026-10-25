@@ -39,18 +39,6 @@ public final class HookIpcClient {
     // a healthy newly registered connection because of an older timer.
     private boolean registered = false;
     private volatile IHookBroker broker;
-    private final Runnable retryRunnable = () -> {
-        retryScheduled = false;
-        if (registered) return;
-        if (bound) {
-            try { context.unbindService(connection); }
-            catch (Exception ignored) { }
-            bound = false;
-        }
-        broker = null;
-        bindNow();
-    };
-
     private void requireModuleCaller() {
         AppOpsManager ops = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
         if (ops == null) throw new SecurityException("AppOps unavailable");
@@ -161,6 +149,19 @@ public final class HookIpcClient {
             scheduleRetry();
         }
     };
+
+    private final Runnable retryRunnable = () -> {
+        retryScheduled = false;
+        if (registered) return;
+        if (bound) {
+            try { context.unbindService(connection); }
+            catch (Exception ignored) { }
+            bound = false;
+        }
+        broker = null;
+        bindNow();
+    };
+
 
     public HookIpcClient(Context context, LoginAction loginAction, StatusAction statusAction) {
         // Application.attach may run before getApplicationContext() is ready.
