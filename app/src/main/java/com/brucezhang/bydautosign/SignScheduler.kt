@@ -238,10 +238,15 @@ internal object SignScheduler {
     }
 
     /** Called on scheduled completion or successful manual sign, never on each UI refresh. */
-    fun afterResult(context: Context, response: ActionResult): Boolean {
+    fun afterResult(context: Context, response: ActionResult,
+                    scheduledDay: String? = null): Boolean {
         val store = SignStore(context)
         val now = ZonedDateTime.now()
-        store.retryAt = if (response.ok) 0L else DailySchedulePolicy.retryAfter(now)
+        // An attempt started yesterday but completed after midnight must not
+        // create a retry before today's configured daily starting time.
+        val belongsToToday = scheduledDay == null || scheduledDay == now.toLocalDate().toString()
+        store.retryAt = if (response.ok || !belongsToToday) 0L
+            else DailySchedulePolicy.retryAfter(now)
         val result = reschedule(context)
         if (!response.ok && store.retryAt > 0L && !result.startsWith("设置定时失败")) {
             runCatching { ScheduleEventLog(context).append(
@@ -319,7 +324,8 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             response.ok -> "签到成功"
             else -> "签到失败 · ${response.failure.label}"
         })
-        val done = SignScheduler.afterResult(applicationContext, response)
+        val done = SignScheduler.afterResult(applicationContext, response,
+            inputData.getString("scheduled_local_day"))
         // Retry failures are intermediate events; avoid hourly notification spam.
         if (done) SignNotifier(applicationContext).notifyResult(response)
         Result.success()

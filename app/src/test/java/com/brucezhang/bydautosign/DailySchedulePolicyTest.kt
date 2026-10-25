@@ -54,6 +54,15 @@ class DailySchedulePolicyTest {
         assertFalse(plan.retry)
     }
 
+    @Test fun aPreviousDayAttemptCannotScheduleHourlyRetryInTheNewDay() {
+        val yesterday = now(25, 23, 59).toLocalDate().toString()
+        val today = now(26, 0, 1).toLocalDate().toString()
+        assertTrue(yesterday != today)
+        // A worker ending after midnight must discard its previous-day retry.
+        val planned = DailySchedulePolicy.next("06:15", now(26, 0, 1), false, 0L)
+        assertEquals(now(26, 6, 15).toInstant().toEpochMilli(), planned.at)
+    }
+
     @Test fun midnightAndUtcOffsetsUseLocalDates() {
         val instant = now(25, 23, 1)
         assertEquals(0L, DailySchedulePolicy.retryAfter(instant))
