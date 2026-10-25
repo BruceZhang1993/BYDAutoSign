@@ -94,7 +94,6 @@ public final class IpcBrokerService extends Service {
         endpoint = null;
         deathRecipient = null;
         registeredUid = -1;
-        signalConnectionChanged();
     }
 
     @Override
