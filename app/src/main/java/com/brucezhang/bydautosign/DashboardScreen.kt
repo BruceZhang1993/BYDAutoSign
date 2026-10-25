@@ -95,23 +95,12 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
         }
     }
 
-    // A platform 24-hour time picker replaces the comma-separated free text field.
-    // Keep the normalized persisted format for backwards compatibility.
-    fun pickTime(previous: String? = null) {
-        val seed = previous ?: "07:01"
-        val hour = seed.substringBefore(':').toIntOrNull() ?: 7
-        val minute = seed.substringAfter(':').toIntOrNull() ?: 1
+    // A single daily time, edited with the system's 24-hour time picker.
+    fun pickTime() {
+        val hour = times.substringBefore(':').toIntOrNull() ?: 7
+        val minute = times.substringAfter(':').toIntOrNull() ?: 1
         TimePickerDialog(context, { _, chosenHour, chosenMinute ->
-            val value = String.format(Locale.ROOT, "%02d:%02d", chosenHour, chosenMinute)
-            val entries = ScheduleTimes.normalize(times)?.split(',')?.toMutableList()
-                ?: mutableListOf()
-            if (previous != null) entries.remove(previous)
-            if (value in entries) {
-                scope.launch { snackbars.showSnackbar("这个签到时间已存在") }
-            } else {
-                entries.add(value)
-                times = entries.sorted().joinToString(",")
-            }
+            times = String.format(Locale.ROOT, "%02d:%02d", chosenHour, chosenMinute)
         }, hour, minute, true).show()
     }
 
@@ -291,37 +280,15 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                                 Switch(checked = enabled, onCheckedChange = { enabled = it })
                             }
                             HorizontalDivider()
-                            Text("签到时间", style = MaterialTheme.typography.titleSmall)
-                            Text("每天按以下时间尝试签到，已签到时仍记录闹钟触发与跳过。",
+                            Text("每日签到时间", style = MaterialTheme.typography.titleSmall)
+                            Text("每天从设定时间开始尝试签到。成功后当天停止；失败后每隔一小时重试，最晚到当天结束。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            val selectedTimes = ScheduleTimes.normalize(times)?.split(',') ?: emptyList()
-                            selectedTimes.forEach { value ->
-                                Row(modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(onClick = { pickTime(value) },
-                                        modifier = Modifier.weight(1f)) {
-                                        Icon(Icons.Outlined.AccessTime, contentDescription = null)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(value, style = MaterialTheme.typography.titleMedium)
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            times = selectedTimes.filterNot { it == value }.joinToString(",")
-                                        },
-                                        enabled = selectedTimes.size > 1
-                                    ) {
-                                        Icon(Icons.Outlined.DeleteOutline,
-                                            contentDescription = "删除 $value")
-                                    }
-                                }
-                            }
-                            TextButton(onClick = { pickTime() },
-                                enabled = selectedTimes.size < 8) {
-                                Icon(Icons.Outlined.Add, contentDescription = null)
+                            OutlinedButton(onClick = { pickTime() },
+                                modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Outlined.AccessTime, contentDescription = null)
                                 Spacer(Modifier.width(8.dp))
-                                Text("添加时间（${selectedTimes.size}/8）")
+                                Text(times, style = MaterialTheme.typography.titleMedium)
                             }
                             Text(if (enabled) state.next else "关闭后将取消自动签到",
                                 style = MaterialTheme.typography.bodySmall,
@@ -347,7 +314,7 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                             SettingsInfoRow(Icons.Outlined.Notifications,
                                 "系统通知", if (notificationsAllowed) "已允许签到结果通知"
                                     else "当前无法显示签到结果通知")
-                            Text("成功或最终失败时提醒；今天已签到和重试过程不提醒。",
+                            Text("签到成功或当天最后一次失败时提醒；中途每小时重试不重复提醒。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             if (!notificationsAllowed && Build.VERSION.SDK_INT >= 33) {
@@ -535,7 +502,7 @@ private fun TodaySummary(
         else -> "等待今日签到"
     }
     val statusDetail = when {
-        state.signedToday -> "今日已完成；后续定时触发将记录跳过，不重复签到"
+        state.signedToday -> "今日签到完成，不再安排当天任务；明天按设定时间继续"
         !state.sessionReady -> "完成微信授权后，才能进行签到"
         latestFailureToday -> state.lastResult
         !state.enabled -> "定时任务已关闭，仍可手动签到"
@@ -570,9 +537,17 @@ private fun TodaySummary(
             HorizontalDivider(color = fg.copy(alpha = 0.18f))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("下次计划", style = MaterialTheme.typography.labelMedium, color = fg)
-                    Text(if (state.enabled) viewTime(state.scheduleTrace.nextAt, true) else "未启用",
+                    Text("下次调度", style = MaterialTheme.typography.labelMedium, color = fg)
+                    Text(if (state.enabled) viewTime(state.scheduleTrace.nextAt) else "未启用",
                         style = MaterialTheme.typography.titleMedium, color = fg)
+                    if (state.enabled) {
+                        Text(when {
+                            state.scheduleTrace.nextAt <= 0L -> "等待调度建立"
+                            state.nextRetry -> "失败后 1 小时重试"
+                            state.signedToday -> "今日已完成 · 明日正常签到"
+                            else -> "按每日设定时间签到"
+                        }, style = MaterialTheme.typography.bodySmall, color = fg)
+                    }
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text("最近执行", style = MaterialTheme.typography.labelMedium, color = fg)

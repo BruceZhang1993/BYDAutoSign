@@ -8,7 +8,7 @@ BYD Auto Sign is an unofficial Android app that automatically checks in to the B
 
 ## Features
 
-- **Automatic daily check-ins:** Choose when to check in, with up to eight times per day.
+- **Automatic daily check-ins:** Set one daily start time; unsuccessful attempts retry hourly until the day ends.
 - **One-tap check-in:** Check in manually from the home screen.
 - **Check-in history:** See recent results and understandable failure messages.
 - **Result notifications:** Get notified after a first successful check-in or a final failure, without alerts for repeated completed check-ins.
@@ -48,13 +48,13 @@ On the home screen, tap **Check in now** (**立即签到**) to check in manually
 
 ### 3. Schedule daily check-ins
 
-Open **Settings** (**设置**), enable daily automatic check-in and tap **Add time** to choose a time using the 24-hour system time picker. You can edit or remove individual times (up to **8**), then tap **Save changes** (**保存更改**). The home screen shows the next planned time.
+Open **Settings** (**设置**), enable daily automatic check-in and choose **one** start time using the 24-hour system time picker. Tap **Save changes** (**保存更改**). A successful or already-completed check-in stops further attempts that day. A failed attempt schedules another one hour later, until midnight; the next day starts again at the configured time. Existing multi-time schedules migrate to their earliest valid time. The home screen shows the **next actual scheduled time** and whether it is an hourly retry.
 
 If your phone offers **exact alarm permission**, enabling it can reduce delays. Some phones may also need fewer battery or background restrictions for reliable scheduling.
 
 ### 4. View results
 
-The home screen shows recent check-ins and schedule events separately. Open **Check-in history** (**签到记录**) and switch to **Schedule triggers** (**调度触发**) to confirm an alarm actually fired, work was queued, or an already-completed check-in was safely skipped. A skipped trigger does not submit a second check-in. Use **Diagnostics** (**运行诊断**) for detailed status and redacted exports.
+The home screen shows recent check-ins and schedule events separately. Open **Check-in history** (**签到记录**) and switch to **Schedule triggers** (**调度触发**) to confirm an alarm actually fired, work was queued, or a failure triggered the next hourly retry. A skipped trigger does not submit a second check-in. Use **Diagnostics** (**运行诊断**) for detailed status and redacted exports.
 
 Enable notification permission if you want result alerts. Disabling notifications does not disable check-ins.
 

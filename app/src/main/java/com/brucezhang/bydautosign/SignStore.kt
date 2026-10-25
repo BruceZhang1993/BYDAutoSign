@@ -98,10 +98,25 @@ internal class SignStore(context: Context) {
         get() = prefs.getLong("last_run", 0L)
         set(value) { prefs.edit().putLong("last_run", value).apply() }
 
+    /** Read the original value when cleaning up alarms created by older versions. */
+    val rawTimes: String
+        get() = prefs.getString("times", "07:01") ?: "07:01"
+
     var times: String
-        get() = prefs.getString("times", "00:01,07:01,13:01,22:01")
-            ?: "00:01,07:01,13:01,22:01"
-        set(value) { prefs.edit().putString("times", value).commit() }
+        get() {
+            val original = rawTimes
+            val migrated = ScheduleTimes.migrate(original)
+            if (migrated != original) check(prefs.edit().putString("times", migrated).commit())
+            return migrated
+        }
+        set(value) {
+            check(prefs.edit().putString("times", requireNotNull(ScheduleTimes.normalize(value))).commit())
+        }
+
+    /** An hourly retry is meaningful only for the local day on which it was created. */
+    var retryAt: Long
+        get() = prefs.getLong("retry_at", 0L)
+        set(value) { check(prefs.edit().putLong("retry_at", value).commit()) }
 
     var enabled: Boolean
         get() = prefs.getBoolean("enabled", true)

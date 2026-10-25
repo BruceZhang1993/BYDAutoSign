@@ -57,6 +57,7 @@ internal data class NativeUiState(
     val times: String = "",
     val exact: Boolean = false,
     val next: String = "",
+    val nextRetry: Boolean = false,
     val lastResult: String = "尚未执行",
     val lastRun: String = "",
     val signedToday: Boolean = false,
@@ -98,13 +99,14 @@ internal class NativeSignManager(private val context: android.content.Context) {
             sessionError = when {
                 sessionCheck.isFailure -> "本地会话不可解密，请重新授权"
                 store.automaticBlockKind() == SignFailureKind.AUTH_EXPIRED ->
-                    "会话已过期，自动签到暂停；请重新授权"
+                    "会话已过期，请重新授权；自动重试仍会按计划运行"
                 else -> ""
             },
             enabled = store.enabled,
             times = store.times,
             exact = SignScheduler.exactAllowed(context),
             next = next,
+            nextRetry = store.retryAt > 0 && store.retryAt == telemetry.nextAt,
             lastResult = store.lastResult,
             lastRun = formatted,
             signedToday = store.signedToday(),
@@ -171,13 +173,14 @@ internal class NativeSignManager(private val context: android.content.Context) {
 
     suspend fun sign(): ActionResult = withContext(Dispatchers.IO) {
         val result = SignCoordinator.sign(context, SignOrigin.MANUAL)
+        if (result.ok) SignScheduler.afterResult(context, result)
         SignNotifier(context).notifyResult(result)
         result
     }
 
     suspend fun saveSchedule(enabled: Boolean, times: String): ActionResult = withContext(Dispatchers.IO) {
         val valid = ScheduleTimes.normalize(times) != null
-        if (!valid) ActionResult(false, "请选择至少一个有效时间（最多8组）")
+        if (!valid) ActionResult(false, "请选择一个有效的每日签到时间")
         else {
             val result = SignScheduler.configure(context, enabled, times)
             ActionResult(!result.startsWith("设置定时失败"), result)
