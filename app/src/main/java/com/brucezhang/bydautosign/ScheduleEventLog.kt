@@ -7,6 +7,9 @@ import org.json.JSONObject
 /** A schedule wake-up is not a sign request; track it separately from SignHistory. */
 internal enum class ScheduleEventType(val label: String) {
     ALARM_FIRED("定时闹钟已触发"),
+    MISSED_WAKE("计划时间未收到闹钟唤醒"),
+    RETRY_PLANNED("签到失败，已安排每小时重试"),
+    SCHEDULE_FAILED("闹钟注册失败"),
     WORK_QUEUED("签到任务已提交"),
     SKIPPED_SIGNED("今日已签到，跳过"),
     SKIPPED_DISABLED("自动签到已关闭，跳过"),

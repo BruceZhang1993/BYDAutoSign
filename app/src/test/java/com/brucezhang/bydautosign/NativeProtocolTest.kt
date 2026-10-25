@@ -22,8 +22,8 @@ class NativeProtocolTest {
     }
 
     @Test fun schedulerTimeValidation() {
-        assertEquals("00:01,07:01,22:01",
-            ScheduleTimes.normalize("22:01, 00:01,07:01,07:01"))
+        assertEquals("07:01", ScheduleTimes.normalize("07:01"))
+        assertEquals("00:01", ScheduleTimes.migrate("22:01, 00:01,07:01,07:01"))
         assertEquals(null, ScheduleTimes.normalize("25:10"))
         assertEquals(null, ScheduleTimes.normalize("08:30,"))
         assertEquals(null, ScheduleTimes.normalize("8:30"))
@@ -31,7 +31,8 @@ class NativeProtocolTest {
 
     @Test fun nextAlarmCrossesMidnight() {
         val now = ZonedDateTime.of(2026, 10, 23, 23, 30, 0, 0, ZoneId.of("Asia/Shanghai"))
+        val alarm = DailySchedulePolicy.next("00:01", now, false, 0L)
         assertEquals("2026-10-24T00:01+08:00[Asia/Shanghai]",
-            ScheduleTimes.next("00:01,07:01", now).toString())
+            java.time.Instant.ofEpochMilli(alarm.at).atZone(now.zone).toString())
     }
 }
