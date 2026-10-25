@@ -1,4 +1,4 @@
-# BYD Auto Sign 原生架构（v0.5.2）
+# BYD Auto Sign 原生架构（v0.5.5）
 
 ```text
 用户点击初始化/重新授权
@@ -8,12 +8,13 @@
   → NativeSignEngine.exchangeSession (JCA + OkHttp TLS)
   → SignStore (AndroidKeyStore AES-GCM 密文)
 
-每天用户定义的多个 HH:mm 时间
+每天用户定义的一个 HH:mm 时间（失败时每小时重试）
   → AlarmManager RTC_WAKEUP (精确/非精确)
   → SignAlarmReceiver (只排下一次闹钟并派发)
   → WorkManager (网络约束、指数重试)
   → SignCoordinator (今日幂等、互斥)
-  → NativeSignEngine.sign (读已缓存 BYD session，不唤醒微信)
+  → AutoSessionRefresher (跨天使用 Binder 取新 Code 并兑换新 Session；离线回退旧会话)
+  → NativeSignEngine.sign (使用新会话或安全回退的缓存会话，不启动微信)
   → SignStore (记录成功日期、结果、连续天数)
   → SignHistory (100条结构化执行记录)
   → ScheduleTelemetry (计划/闹钟/入队/执行/自检)
@@ -36,7 +37,7 @@ BYD 旧客户端协议：`AES-128-CBC/PKCS5Padding` + Base64，`SHA-256(APPSECRE
 
 自定义时间按手机本地时区计算，每次仅注册下一次闹钟。Android 12+ 没有精确闹钟特权时回退 `setAndAllowWhileIdle`。闹钟广播只提交一次唯一 WorkManager 任务，签到在网络可用时运行，重试最多四次；开机/升级/时区/时间及权限变化重新注册，并在当天至少一个配置时刻已到且未签到时补偿。另有每 12 小时的 WorkManager 低频 watchdog：如系统在撤销精确闹钟权限时静默清除了闹钟，可延迟重建并补签（不保证准确时刻）。
 
-WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可能限制 AlarmManager，实机状态与连续运行验证不可省略。任务不请求 Binder、不唤醒微信、不刷新 session。
+WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可能限制 AlarmManager，实机状态与连续运行验证不可省略。任务会优先通过 Binder 进行当日会话刷新（最迟等待 12 秒以允许既有 Hook 重连），但不主动启动微信、不调用 Root。若取码失败，优先回退到缓存会话；若失败疑似授权过期，则按当天每小时策略继续重试。
 
 ## v0.5.2 调度自愈与错误恢复
 
@@ -49,7 +50,7 @@ WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可
 
 - 主微信 Binder 取码、线上成功签到、锁屏调度、重启恢复及跨天复用已经当前设备实机验收；网络恢复、会话过期及其他 ROM 仍待专项验证。
 - 跨 Android User 微信分身暂不支持新授权；不隐式读取旧 Root 会话。
-- 尚未实现主动自动重授权、通知配置、多账号/多品牌 Provider。
+- 已实现用户开启自动签到后的逐日授权刷新；但微信进程被系统终止时不能无 Root 强行启动，因此仍需微信 Hook 连接。暂不支持通知配置、多账号/多品牌 Provider。
 - 安卓进程被系统限制、精确闹钟特权被撤销时执行可能延迟。
 
 
@@ -57,3 +58,11 @@ WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可
 - 设置页采用原生 24 小时制时间选择器，逐条增删改、最多 8 个；存储仍使用原有规范化 `HH:mm` 列表，保持兼容。
 - `SignHistory` 只记录真实签到请求；`ScheduleEventLog` 单独保留最近 100 条闹钟触发、任务提交和已签到/阻断跳过记录。若此前已有已签到标记、但旧版本没有历史，只有保存了可信的执行时间和成功结果时才补录一次。
 - 闹钟触发后即使今日已签到，也记录触发与跳过（不再调用签到接口），并在首页、历史筛选页和脱敏诊断导出中展示。
+
+## v0.5.5 微信授权自动恢复
+
+- 每个本地日期首次真实签到时，若缓存会话来自前一日，则通过经 UID/AppOps 验证的微信 Binder 重新获取**一次性**登录 Code，立即兑换新 Session；不持久化 Code。
+- Binder 暂未连接时最多等待 12 秒；微信 Hook 已有 5 秒重绑周期。修复 Hook 重绑成功后被旧重试定时器意外解绑的竞争条件。
+- Hook 返回 -100（请求繁忙）时延迟 2.5 秒后最多再取码一次；对 -210/-603（取码超时）和映射失效不进行盲目循环请求。
+- Session 刷新失败时保留旧缓存；疑似失效的 ret=50010 仅作为刷新线索，不能直接判定为授权过期。当失败发生时继续保留当天每小时重试与本地幂等控制。
+- 只在首页和诊断导出保存授权刷新阶段枚举、取码状态整数和发生时间，不保存 Code、Session 和原始服务端响应。无法无 Root 保证后台唤醒已结束的微信进程。
