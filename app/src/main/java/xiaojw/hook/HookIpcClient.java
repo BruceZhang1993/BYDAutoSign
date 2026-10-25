@@ -151,7 +151,9 @@ public final class HookIpcClient {
         }
     };
 
-    private final Runnable retryRunnable = () -> {
+    private final Runnable retryRunnable = this::retryNow;
+
+    private void retryNow() {
         retryScheduled = false;
         if (registered) return;
         if (bound) {
@@ -161,7 +163,7 @@ public final class HookIpcClient {
         }
         broker = null;
         bindNow();
-    };
+    }
 
 
     public HookIpcClient(Context context, LoginAction loginAction, StatusAction statusAction) {
