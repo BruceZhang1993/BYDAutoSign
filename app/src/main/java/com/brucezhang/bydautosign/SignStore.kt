@@ -74,9 +74,18 @@ internal class SignStore(context: Context) {
             enumValueOf<AutoRefreshStatus>(prefs.getString("auto_refresh_status", "") ?: "")
         }.getOrDefault(AutoRefreshStatus.NEVER)
 
-    fun recordAutoRefresh(status: AutoRefreshStatus) {
-        prefs.edit().putLong("auto_refresh_at", System.currentTimeMillis())
-            .putString("auto_refresh_status", status.name).commit()
+    val lastAutoRefreshCode: Int?
+        get() = if (prefs.contains("auto_refresh_code")) {
+            AutoRefreshDiagnostics.safeCode(prefs.getInt("auto_refresh_code", 0))
+        } else null
+
+    fun recordAutoRefresh(status: AutoRefreshStatus, code: Int? = null) {
+        val edit = prefs.edit().putLong("auto_refresh_at", System.currentTimeMillis())
+            .putString("auto_refresh_status", status.name)
+        val safe = AutoRefreshDiagnostics.safeCode(code)
+        if (safe != null) edit.putInt("auto_refresh_code", safe)
+        else edit.remove("auto_refresh_code")
+        check(edit.commit()) { "无法保存授权刷新诊断" }
     }
 
     /** Automatic retries should stop after nonrecoverable errors, but manual sign remains available. */
