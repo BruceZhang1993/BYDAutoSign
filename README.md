@@ -15,7 +15,7 @@ BYD Auto Sign is an unofficial Android app that automatically checks in to the B
 - **Troubleshooting tools:** View scheduling information and export a privacy-conscious diagnostic report.
 - **A clean interface:** Supports your phone's light and dark appearance.
 
-After you authorize the app, it can check in using the authorization saved on your phone. WeChat does not need to remain open.
+Before the first check-in of each local day, the app tries to refresh its saved session through a connected WeChat hook. If the hook is unavailable, it falls back to the cached session.
 
 ## Requirements
 
@@ -66,7 +66,7 @@ Enable notification permission if you want result alerts. Disabling notification
 Daily check-ins themselves do not use Root. A functioning LSPosed environment is still required for WeChat authorization and may require Root to set up.
 
 **Must WeChat stay running in the background?**  
-No. WeChat is needed for initial authorization or reauthorization, not for everyday scheduled check-ins.
+A running WeChat process and connected LSPosed hook make daily session refresh more reliable. If WeChat is unavailable, the app falls back to the saved session and retries failed check-ins hourly. It does not forcibly launch WeChat in the background or use Root commands.
 
 **Authorization says WeChat is not connected. What should I do?**  
 Make sure WeChat is installed, the module is enabled in LSPosed, WeChat is selected in its scope and WeChat has been fully restarted. Open WeChat once, then try authorizing again. Some WeChat versions may not yet be compatible.
@@ -75,7 +75,7 @@ Make sure WeChat is installed, the module is enabled in LSPosed, WeChat is selec
 Check that automatic check-in is enabled, a next run is shown, the network works and your phone is not blocking background activity. Grant exact alarm permission if available. Use **Diagnostics** to see the latest recorded events. Android cannot guarantee exact execution times.
 
 **Why do I need to authorize again?**  
-Saved authorization can expire or be lost after clearing app data or reinstalling. Open Settings and tap **Reauthorize** (**重新授权**). The app does not require you to type in your BYD account password.
+Saved authorization can expire. The app now tries automatic refresh before the day's check-in and once more on suspected expiration, with at most one refresh per execution. Check the latest refresh status on the home screen. If WeChat's hook cannot connect, open WeChat and use **Reauthorize** (**重新授权**) if necessary.
 
 **Will I keep getting notifications if today is already complete?**  
 No. The app skips completed check-ins and does not notify you just because it retries a task. With notifications enabled, it alerts you to a first success or final failure.
