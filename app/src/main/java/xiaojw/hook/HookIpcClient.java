@@ -35,7 +35,21 @@ public final class HookIpcClient {
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean bound = false;
     private boolean retryScheduled = false;
+    // Main-thread state: retry a failed registration, but never tear down
+    // a healthy newly registered connection because of an older timer.
+    private boolean registered = false;
     private volatile IHookBroker broker;
+    private final Runnable retryRunnable = () -> {
+        retryScheduled = false;
+        if (registered) return;
+        if (bound) {
+            try { context.unbindService(connection); }
+            catch (Exception ignored) { }
+            bound = false;
+        }
+        broker = null;
+        bindNow();
+    };
 
     private void requireModuleCaller() {
         AppOpsManager ops = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
@@ -105,14 +119,25 @@ public final class HookIpcClient {
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
-            broker = IHookBroker.Stub.asInterface(service);
+            final IHookBroker current = IHookBroker.Stub.asInterface(service);
+            broker = current;
+            registered = false;
             new Thread(() -> {
                 try {
-                    broker.registerHook(endpoint, IpcBrokerService.PROTOCOL_VERSION);
+                    // Capture this Binder; reconnect can replace the shared field.
+                    current.registerHook(endpoint, IpcBrokerService.PROTOCOL_VERSION);
                     Log.i(TAG, "Hook registered with Binder Broker");
+                    main.post(() -> {
+                        if (broker != current) return;
+                        registered = true;
+                        if (retryScheduled) {
+                            main.removeCallbacks(retryRunnable);
+                            retryScheduled = false;
+                        }
+                    });
                 } catch (Exception error) {
                     Log.w(TAG, "Binder registration failed: " + error.getClass().getSimpleName());
-                    scheduleRetry();
+                    if (broker == current) scheduleRetry();
                 }
             }, "byd-ipc-register").start();
         }
@@ -120,6 +145,7 @@ public final class HookIpcClient {
         @Override
         public void onServiceDisconnected(ComponentName name) {
             broker = null;
+            registered = false;
             scheduleRetry();
         }
 
@@ -162,17 +188,9 @@ public final class HookIpcClient {
 
     private void scheduleRetry() {
         main.post(() -> {
-            if (retryScheduled) return;
+            if (registered || retryScheduled) return;
             retryScheduled = true;
-            main.postDelayed(() -> {
-                retryScheduled = false;
-                if (bound) {
-                    try { context.unbindService(connection); }
-                    catch (Exception ignored) { }
-                    bound = false;
-                }
-                bindNow();
-            }, 5000);
+            main.postDelayed(retryRunnable, 5000);
         });
     }
 }
