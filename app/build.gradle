@@ -11,8 +11,8 @@ android {
         minSdk 26
         // Preserve wxcode target API during stage-1 compatibility migration.
         targetSdk 34
-        versionCode 9
-        versionName '0.5.3'
+        versionCode 10
+        versionName '0.5.4'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     // Use the same private signing key for every release build so Android
