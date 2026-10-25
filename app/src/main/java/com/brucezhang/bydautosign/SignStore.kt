@@ -199,7 +199,10 @@ internal object SignCoordinator {
             // The bounded ledger stores enum values only, never BYD response text.
             runCatching {
                 SignHistory(context).append(SignHistoryEntry(
-                    now, origin, status, outcome.failure, attempt
+                    now, origin, status, outcome.failure, attempt,
+                    businessCode = outcome.businessCode,
+                    serverMessage = outcome.serverMessage,
+                    httpStatus = outcome.httpStatus
                 ))
             }
             ActionResult(outcome.success, message, outcome.shouldRetry,

@@ -33,7 +33,7 @@ class DiagnosticReportTest {
             notificationsAllowed = true)
         assertFalse(serialized.contains(secret))
         val json = JSONObject(serialized)
-        assertEquals(2, json.getInt("schema"))
+        assertEquals(3, json.getInt("schema"))
         assertEquals("0.5.2", json.getString("appVersion"))
         assertEquals(35, json.getInt("androidApi"))
         assertTrue(json.getJSONObject("permissions").getBoolean("notificationsAllowed"))
@@ -57,6 +57,29 @@ class DiagnosticReportTest {
         assertFalse(json.has("session"))
         assertFalse(json.has("ipc"))
         assertFalse(json.has("lastResult"))
+    }
+
+    @Test fun businessFailureReportIncludesSafeServerInfoAndDropsUntrustedText() {
+        val secret = "token_SECRET_SESSION_123456"
+        val state = NativeUiState(history = listOf(
+            SignHistoryEntry(100L, SignOrigin.MANUAL, SignRecordStatus.FAILED,
+                SignFailureKind.BUSINESS, 1, businessCode = 412,
+                serverMessage = "签到资格异常"),
+            SignHistoryEntry(200L, SignOrigin.SCHEDULED, SignRecordStatus.FAILED,
+                SignFailureKind.BUSINESS, 1, businessCode = 413,
+                serverMessage = "错误信息 " + secret),
+            SignHistoryEntry(300L, SignOrigin.SCHEDULED, SignRecordStatus.FAILED,
+                SignFailureKind.HTTP_CLIENT, 1, httpStatus = 403)
+        ))
+        val serialized = DiagnosticReport.build(state, "0.5.3", 35, "Asia/Tokyo", 123456789L)
+        assertFalse(serialized.contains(secret))
+        val entries = JSONObject(serialized).getJSONArray("history")
+        assertEquals(3, entries.length())
+        assertEquals(412, entries.getJSONObject(0).getInt("businessCode"))
+        assertEquals("签到资格异常", entries.getJSONObject(0).getString("serverMessage"))
+        assertEquals(413, entries.getJSONObject(1).getInt("businessCode"))
+        assertFalse(entries.getJSONObject(1).has("serverMessage"))
+        assertEquals(403, entries.getJSONObject(2).getInt("httpStatus"))
     }
 
     @Test fun suspiciousScheduleConfigIsNeverCopiedToReport() {
