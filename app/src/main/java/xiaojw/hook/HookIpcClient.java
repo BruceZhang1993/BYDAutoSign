@@ -71,8 +71,9 @@ public final class HookIpcClient {
                     || !AUTH_APP_ID.equals(appId)) {
                 throw new IllegalArgumentException("Invalid authorization request");
             }
-            // There is no unsolicited login. Broker calls this only for an
-            // explicit user action. Never block an incoming Binder thread.
+            // Only the authenticated module can request a one-time code,
+            // for explicit authorization or user-enabled daily refresh.
+            // Never block an incoming Binder thread.
             if (!loginInFlight.compareAndSet(false, true)) {
                 try { callback.onResult(requestId, -100, ""); }
                 catch (RemoteException ignored) { }
