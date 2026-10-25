@@ -115,7 +115,11 @@ internal object AutoSessionRefresher {
         val store = SignStore(context)
 
         fun fail(status: AutoRefreshStatus, code: Int? = null): String? {
-            store.recordAutoRefresh(status, AutoRefreshDiagnostics.safeCode(code))
+            // Diagnostics must never turn a recoverable refresh failure
+            // into an unhandled sign-worker exception.
+            runCatching {
+                store.recordAutoRefresh(status, AutoRefreshDiagnostics.safeCode(code))
+            }
             return null
         }
 
@@ -160,7 +164,7 @@ internal object AutoSessionRefresher {
         } catch (_: Exception) {
             return fail(AutoRefreshStatus.STORAGE_FAILED)
         }
-        store.recordAutoRefresh(AutoRefreshStatus.SUCCESS)
+        runCatching { store.recordAutoRefresh(AutoRefreshStatus.SUCCESS) }
         return session
     }
 }
