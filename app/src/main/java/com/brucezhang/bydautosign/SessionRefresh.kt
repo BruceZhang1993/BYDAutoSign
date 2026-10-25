@@ -23,8 +23,13 @@ internal object AutoSessionRefreshPolicy {
 }
 
 internal enum class AutoRefreshStatus(val label: String) {
-    NEVER("尚未尝试"), SUCCESS("成功"), BINDER_UNAVAILABLE("微信 Hook 未连接"),
-    CODE_FAILED("微信取码失败"), EXCHANGE_FAILED("会话兑换失败"),
+    NEVER("尚未尝试"), SUCCESS("成功"),
+    BINDER_UNAVAILABLE("微信 Hook 未连接"),
+    CODE_BUSY("微信取码任务繁忙"),
+    CODE_TIMEOUT("微信取码超时"),
+    HOOK_NOT_READY("微信 Hook 映射未就绪"),
+    CODE_FAILED("微信取码失败"),
+    EXCHANGE_FAILED("会话兑换失败"),
     STORAGE_FAILED("会话保存失败")
 }
 
@@ -33,6 +38,19 @@ internal enum class AutoRefreshStatus(val label: String) {
  * not discard a working cached session. Sign success is authoritative even
  * if the optional refresh failed.
  */
+/** Only stable, non-sensitive status numbers can be retained. */
+internal object AutoRefreshDiagnostics {
+    fun safeCode(value: Int?): Int? = value?.takeIf { it in -9999..9999 }
+
+    fun fromCodeStatus(status: Int): AutoRefreshStatus = when (status) {
+        -601, -605 -> AutoRefreshStatus.BINDER_UNAVAILABLE
+        -100 -> AutoRefreshStatus.CODE_BUSY
+        -210, -603 -> AutoRefreshStatus.CODE_TIMEOUT
+        -310, -311 -> AutoRefreshStatus.HOOK_NOT_READY
+        else -> AutoRefreshStatus.CODE_FAILED
+    }
+}
+
 internal class FreshSessionSigner(
     private val refresh: () -> String?,
     private val sign: (String) -> SignOutcome
@@ -81,7 +99,7 @@ internal class FreshSessionSigner(
                 outcome.failure == SignFailureKind.NO_SESSION ||
                 outcome.failure == SignFailureKind.SESSION_UNREADABLE)) {
             return outcome.copy(
-                message = outcome.message + " · 自动刷新授权失败，请检查微信 Hook 连接",
+                message = outcome.message + " · 自动刷新授权失败，请查看授权状态",
                 shouldRetry = true
             )
         }
@@ -91,17 +109,48 @@ internal class FreshSessionSigner(
 
 /** Auto refresh never launches WeChat or exposes credentials in diagnostic text. */
 internal object AutoSessionRefresher {
+    private const val REBIND_GRACE_MS = 12_000L
+
     fun refresh(context: Context, engine: NativeSignEngine): String? {
         val store = SignStore(context)
-        fun fail(status: AutoRefreshStatus): String? {
-            store.recordAutoRefresh(status)
+
+        fun fail(status: AutoRefreshStatus, code: Int? = null): String? {
+            store.recordAutoRefresh(status, AutoRefreshDiagnostics.safeCode(code))
             return null
         }
-        if (!IpcBrokerService.connected()) return fail(AutoRefreshStatus.BINDER_UNAVAILABLE)
-        val code = runCatching { IpcBrokerService.obtainCode(BydProtocol.APP_ID) }.getOrNull()
-        if (code?.successful() != true) return fail(AutoRefreshStatus.CODE_FAILED)
+
+        // The Hook client already retries a dead Binder every five seconds.
+        // Give it a bounded chance to register instead of immediately failing.
+        // Never launch WeChat, acquire Root or use an unauthenticated HTTP bridge.
+        if (!IpcBrokerService.awaitConnected(REBIND_GRACE_MS)) {
+            return fail(AutoRefreshStatus.BINDER_UNAVAILABLE)
+        }
+
+        var result = runCatching { IpcBrokerService.obtainCode(BydProtocol.APP_ID) }
+            .getOrNull()
+        // A concurrent explicit reauthorization may hold the hook's login
+        // lock. Allow one short grace retry, not another login after timeout.
+        if (result?.status == -100) {
+            try {
+                Thread.sleep(2_500)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return fail(AutoRefreshStatus.CODE_BUSY, -100)
+            }
+            result = runCatching { IpcBrokerService.obtainCode(BydProtocol.APP_ID) }
+                .getOrNull()
+        }
+        if (result?.successful() != true) {
+            val code = result?.status
+            return fail(
+                AutoRefreshDiagnostics.fromCodeStatus(code ?: -602), code
+            )
+        }
+
+        // Code is short-lived and single-use: exchange immediately; never
+        // persist, retry, or log the code or the raw BYD response.
         val session = try {
-            engine.exchangeSession(code.code)
+            engine.exchangeSession(result.code)
         } catch (_: Exception) {
             return fail(AutoRefreshStatus.EXCHANGE_FAILED)
         }
