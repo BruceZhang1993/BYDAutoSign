@@ -107,6 +107,21 @@ class SessionRefreshTest {
         assertEquals(1, calls)
     }
 
+    @Test fun hookStatusCodesRemainTypedAndSecretFree() {
+        assertEquals(AutoRefreshStatus.CODE_BUSY, AutoRefreshDiagnostics.fromCodeStatus(-100))
+        assertEquals(AutoRefreshStatus.CODE_TIMEOUT, AutoRefreshDiagnostics.fromCodeStatus(-210))
+        assertEquals(AutoRefreshStatus.CODE_TIMEOUT, AutoRefreshDiagnostics.fromCodeStatus(-603))
+        assertEquals(AutoRefreshStatus.HOOK_NOT_READY, AutoRefreshDiagnostics.fromCodeStatus(-310))
+        assertEquals(AutoRefreshStatus.HOOK_NOT_READY, AutoRefreshDiagnostics.fromCodeStatus(-311))
+        assertEquals(AutoRefreshStatus.BINDER_UNAVAILABLE,
+            AutoRefreshDiagnostics.fromCodeStatus(-601))
+        assertEquals(AutoRefreshStatus.BINDER_UNAVAILABLE,
+            AutoRefreshDiagnostics.fromCodeStatus(-605))
+        assertEquals(AutoRefreshStatus.CODE_FAILED, AutoRefreshDiagnostics.fromCodeStatus(-500))
+        assertEquals(-310, AutoRefreshDiagnostics.safeCode(-310))
+        assertEquals(null, AutoRefreshDiagnostics.safeCode(Int.MAX_VALUE))
+    }
+
     @Test fun expiredTodayWithoutRefreshRecordsRecoverableFailure() {
         var calls = 0
         val result = FreshSessionSigner(
