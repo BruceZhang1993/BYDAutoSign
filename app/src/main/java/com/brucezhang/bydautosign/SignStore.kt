@@ -240,28 +240,30 @@ internal object SignCoordinator {
                 true, "今日已签到，自动跳过", skipped = true
             )
             val startedAt = System.currentTimeMillis()
-            val sessionResult = runCatching { store.session() }
-            val outcome = FreshSessionSigner(
-                refresh = { AutoSessionRefresher.refresh(context, engine) },
-                sign = { engine.sign(it) }
-            ).execute(
-                cachedSession = sessionResult.getOrNull(),
-                lastAuthorizedAt = store.lastAuthorizedAt,
-                now = startedAt,
-                missingFailure = if (sessionResult.isFailure)
-                    SignFailureKind.SESSION_UNREADABLE else SignFailureKind.NO_SESSION
-            )
+            store.markDayPhase(SignDayPhase.RUNNING, startedAt)
+            val attempt = AuthorizationManager.sign(context, store, engine, startedAt)
+            val outcome = attempt.outcome
             // Capture time *after* the response. A request crossing midnight must
             // not leave the new day unsigned and trigger a second scheduled request.
             val now = System.currentTimeMillis()
+            val awaitingAuthorization = AuthorizationManager.awaitingAuthorization(outcome)
             if (outcome.success) {
                 store.signedDate = SignDatePolicy.completedLocalDate(now)
                 store.clearAutomaticBlock()
                 if (!outcome.alreadySigned) store.streak = outcome.days
             } else {
-                if (outcome.authorizationExpired) store.clearSession()
-                if (!outcome.shouldRetry) store.markAutomaticBlock(outcome.failure, now)
+                // ret=50010 is not a proven expiry signal, so retain encrypted
+                // credentials while preventing futile hourly submissions.
+                if (outcome.businessCode == 50010 || outcome.authorizationExpired) {
+                    store.markSessionSuspectedInvalid(now)
+                }
+                if (!outcome.shouldRetry && !awaitingAuthorization) {
+                    store.markAutomaticBlock(outcome.failure, now)
+                }
             }
+            store.markDayPhase(SignOpportunityPolicy.phaseAfter(
+                outcome.success, awaitingAuthorization
+            ), now)
             if (SignDatePolicy.crossesLocalDay(startedAt, now)) {
                 ScheduleTelemetry(context).crossDayAttempt()
             }
@@ -277,16 +279,22 @@ internal object SignCoordinator {
             }
             store.lastRun = now
             store.lastResult = message
-            // The bounded ledger stores enum values only, never BYD response text.
-            runCatching {
-                SignHistory(context).append(SignHistoryEntry(
-                    now, origin, status, outcome.failure, attempt,
-                    businessCode = outcome.businessCode,
-                    serverMessage = outcome.serverMessage,
-                    httpStatus = outcome.httpStatus
-                ))
+            // Only record an actual BYD sign request in SignHistory. Waiting
+            // for a WeChat code is a scheduler/auth event, not a sign failure.
+            if (attempt.requestSent) {
+                runCatching {
+                    SignHistory(context).append(SignHistoryEntry(
+                        now, origin, status, outcome.failure, attempt,
+                        businessCode = outcome.businessCode,
+                        serverMessage = outcome.serverMessage,
+                        httpStatus = outcome.httpStatus
+                    ))
+                }
             }
-            ActionResult(outcome.success, message, outcome.shouldRetry,
-                outcome.failure, skipped = outcome.alreadySigned)
+            ActionResult(outcome.success, message,
+                retry = outcome.shouldRetry || awaitingAuthorization,
+                failure = outcome.failure, skipped = outcome.alreadySigned,
+                awaitingAuthorization = awaitingAuthorization,
+                requestSent = attempt.requestSent)
         }
 }
