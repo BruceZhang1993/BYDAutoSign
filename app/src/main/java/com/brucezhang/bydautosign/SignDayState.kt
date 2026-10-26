@@ -20,7 +20,7 @@ internal enum class SignTrigger {
 
 /** No platform APIs: easy to test clock boundaries and deduplication. */
 internal object SignOpportunityPolicy {
-    private const val MIN_EVENT_GAP_MS = 2 * 60 * 1000L
+    private const val MIN_EVENT_GAP_MS = 20 * 1000L
     private const val RUNNING_LEASE_MS = 3 * 60 * 1000L
 
     fun due(time: String, now: Long, zone: ZoneId = ZoneId.systemDefault()): Boolean {
