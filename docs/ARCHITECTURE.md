@@ -1,4 +1,4 @@
-# BYD Auto Sign 原生架构（v0.5.5）
+# BYD Auto Sign 原生架构（v0.6.0）
 
 ```text
 用户点击初始化/重新授权
@@ -11,10 +11,10 @@
 每天用户定义的一个 HH:mm 时间（失败时每小时重试）
   → AlarmManager RTC_WAKEUP (精确/非精确)
   → SignAlarmReceiver (只排下一次闹钟并派发)
-  → WorkManager (网络约束、指数重试)
-  → SignCoordinator (今日幂等、互斥)
-  → AutoSessionRefresher (跨天使用 Binder 取新 Code 并兑换新 Session；离线回退旧会话)
-  → NativeSignEngine.sign (使用新会话或安全回退的缓存会话，不启动微信)
+  → WorkManager (唯一后台签到任务，失败由次日/每小时调度和恢复事件补偿)
+  → SignCoordinator (今日幂等、持久化签到状态、互斥)
+  → AuthorizationManager / AutoSessionRefresher (按需取新 Code；被拒旧 Session 不再盲重试)
+  → NativeSignEngine.sign (使用有效候选 Session，不启动微信)
   → SignStore (记录成功日期、结果、连续天数)
   → SignHistory (100条结构化执行记录)
   → ScheduleTelemetry (计划/闹钟/入队/执行/自检)
@@ -50,7 +50,7 @@ WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可
 
 - 主微信 Binder 取码、线上成功签到、锁屏调度、重启恢复及跨天复用已经当前设备实机验收；网络恢复、会话过期及其他 ROM 仍待专项验证。
 - 跨 Android User 微信分身暂不支持新授权；不隐式读取旧 Root 会话。
-- 已实现用户开启自动签到后的逐日授权刷新；但微信进程被系统终止时不能无 Root 强行启动，因此仍需微信 Hook 连接。暂不支持通知配置、多账号/多品牌 Provider。
+- 已实现用户开启自动签到后的逐日授权刷新和微信前台恢复补签；但微信进程被系统终止时不能无 Root 强行启动，仍需依赖其恢复运行。暂不支持多账号/多品牌 Provider。
 - 安卓进程被系统限制、精确闹钟特权被撤销时执行可能延迟。
 
 
@@ -66,3 +66,12 @@ WorkManager 不提供毫秒级执行时间保证。部分 ROM/深度睡眠也可
 - Hook 返回 -100（请求繁忙）时延迟 2.5 秒后最多再取码一次；对 -210/-603（取码超时）和映射失效不进行盲目循环请求。
 - Session 刷新失败时保留旧缓存；疑似失效的 ret=50010 仅作为刷新线索，不能直接判定为授权过期。当失败发生时继续保留当天每小时重试与本地幂等控制。
 - 只在首页和诊断导出保存授权刷新阶段枚举、取码状态整数和发生时间，不保存 Code、Session 和原始服务端响应。无法无 Root 保证后台唤醒已结束的微信进程。
+
+## v0.6.0 每日签到状态机与多事件驱动
+
+- 全部触发来源（闹钟、微信 Hook 重连、微信进入前台、打开本应用、手动）统一交给 `SignCoordinator` 执行，自动触发须到达用户设定的**本地日期最早签到时间**。
+- `SignDayPhase` 按本地日期保存 `WAITING_TIME / RUNNING / WAITING_AUTH / RETRY_PENDING / COMPLETE`；`signed_date` 仍是唯一已确认完成标志。对短期重复机会设 20 秒去抖、RUNNING 状态 3 分钟恢复租约；实际网络请求由原有进程内互斥保护。
+- 微信主进程通过 Android 标准 `Application.ActivityLifecycleCallbacks` 检测用户进入微信前台，30 秒内去抖，再通过绑定后的认证 AIDL `notifyForeground()` 传输无凭证事件；不能主动唤醒已被系统结束的微信进程。
+- `AuthorizationManager` 统一决定会话是否需要刷新、是否可以回退缓存。对 `ret=50010` 仅保留“疑似不可复用”的启发式标记，待换取新 Session 时清除，不再每小时发送同一份可疑旧 Session。
+- 尚未取码、未向比亚迪接口发起请求时，只产生授权等待/调度事件，不能伪造签到请求历史。自动失败保留一小时兜底；用户打开微信后也可通过独立机会自动补签，成功后停止当天后续任务。
+- 详细逻辑、系统边界和实机验收项目：见 [SIGNING_DESIGN_V0.6.md](SIGNING_DESIGN_V0.6.md)。
