@@ -69,6 +69,15 @@ internal class SignStore(context: Context) {
     val lastAutoRefreshAt: Long
         get() = prefs.getLong("auto_refresh_at", 0L)
 
+    /** Debounces reconnect-triggered compensation; never stores any credentials. */
+    var lastHookRecoveryAt: Long
+        get() = prefs.getLong("hook_recovery_at", 0L)
+        set(value) {
+            check(prefs.edit().putLong("hook_recovery_at", value).commit()) {
+                "无法保存重连恢复时间"
+            }
+        }
+
     val lastAutoRefreshStatus: AutoRefreshStatus
         get() = runCatching {
             enumValueOf<AutoRefreshStatus>(prefs.getString("auto_refresh_status", "") ?: "")
