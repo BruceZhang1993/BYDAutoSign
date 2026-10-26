@@ -75,6 +75,7 @@ internal object DiagnosticReport {
                 .put("notificationsAllowed", notificationsAllowed))
             .put("sign", JSONObject()
                 .put("signedToday", state.signedToday)
+                .put("dayPhase", state.dayPhase.name)
                 .put("historyCount", state.history.size)
                 .put("scheduleEventCount", state.scheduleEvents.size))
             .put("schedule", JSONObject()
