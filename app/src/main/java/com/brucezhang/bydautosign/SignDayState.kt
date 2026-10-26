@@ -55,9 +55,16 @@ internal object SignOpportunityPolicy {
 
     fun phaseAfter(
         success: Boolean,
-        waitingForAuthorization: Boolean
+        waitingForAuthorization: Boolean,
+        startedAt: Long = 0L,
+        finishedAt: Long = 0L,
+        zone: ZoneId = ZoneId.systemDefault()
     ): SignDayPhase = when {
         success -> SignDayPhase.COMPLETE
+        // A failed request from yesterday must not mark the new day failed.
+        startedAt > 0L && finishedAt > 0L &&
+            SignDatePolicy.crossesLocalDay(startedAt, finishedAt, zone) ->
+                SignDayPhase.WAITING_TIME
         waitingForAuthorization -> SignDayPhase.WAITING_AUTH
         else -> SignDayPhase.RETRY_PENDING
     }
