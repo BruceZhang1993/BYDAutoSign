@@ -241,8 +241,8 @@ internal object SignCoordinator {
             )
             val startedAt = System.currentTimeMillis()
             store.markDayPhase(SignDayPhase.RUNNING, startedAt)
-            val attempt = AuthorizationManager.sign(context, store, engine, startedAt)
-            val outcome = attempt.outcome
+            val signedAttempt = AuthorizationManager.sign(context, store, engine, startedAt)
+            val outcome = signedAttempt.outcome
             // Capture time *after* the response. A request crossing midnight must
             // not leave the new day unsigned and trigger a second scheduled request.
             val now = System.currentTimeMillis()
@@ -281,7 +281,7 @@ internal object SignCoordinator {
             store.lastResult = message
             // Only record an actual BYD sign request in SignHistory. Waiting
             // for a WeChat code is a scheduler/auth event, not a sign failure.
-            if (attempt.requestSent) {
+            if (signedAttempt.requestSent) {
                 runCatching {
                     SignHistory(context).append(SignHistoryEntry(
                         now, origin, status, outcome.failure, attempt,
@@ -295,6 +295,6 @@ internal object SignCoordinator {
                 retry = outcome.shouldRetry || awaitingAuthorization,
                 failure = outcome.failure, skipped = outcome.alreadySigned,
                 awaitingAuthorization = awaitingAuthorization,
-                requestSent = attempt.requestSent)
+                requestSent = signedAttempt.requestSent)
         }
 }
