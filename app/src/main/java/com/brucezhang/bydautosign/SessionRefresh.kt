@@ -51,41 +51,6 @@ internal object AutoRefreshDiagnostics {
     }
 }
 
-/**
- * A successfully reconnected authenticated hook may recover a scheduled sign
- * that already failed due to a missing Binder. Never sign before the configured
- * daily alarm, after success, or repeatedly for chatty reconnect callbacks.
- */
-internal object HookRecoveryPolicy {
-    private const val COOLDOWN_MS = 15 * 60 * 1000L
-
-    fun shouldResume(
-        enabled: Boolean,
-        signedToday: Boolean,
-        now: Long,
-        lastRefreshAt: Long,
-        refreshStatus: AutoRefreshStatus,
-        lastSignAt: Long,
-        retryAt: Long,
-        lastRecoveryAt: Long,
-        zone: ZoneId = ZoneId.systemDefault()
-    ): Boolean {
-        if (!enabled || signedToday || now <= 0L ||
-            refreshStatus != AutoRefreshStatus.BINDER_UNAVAILABLE) return false
-        if (lastRefreshAt <= 0L || lastSignAt < lastRefreshAt ||
-            retryAt <= now || lastSignAt > now) return false
-
-        val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
-        if (listOf(lastRefreshAt, lastSignAt, retryAt).any {
-                java.time.Instant.ofEpochMilli(it).atZone(zone).toLocalDate() != today
-            }) return false
-        if (lastRecoveryAt > 0L &&
-            java.time.Instant.ofEpochMilli(lastRecoveryAt).atZone(zone).toLocalDate() == today &&
-            now <= lastRecoveryAt + COOLDOWN_MS) return false
-        return true
-    }
-}
-
 internal class FreshSessionSigner(
     private val refresh: () -> String?,
     private val sign: (String) -> SignOutcome
