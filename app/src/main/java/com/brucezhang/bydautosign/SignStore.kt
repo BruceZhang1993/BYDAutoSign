@@ -262,7 +262,7 @@ internal object SignCoordinator {
                 }
             }
             store.markDayPhase(SignOpportunityPolicy.phaseAfter(
-                outcome.success, awaitingAuthorization
+                outcome.success, awaitingAuthorization, startedAt, now
             ), now)
             if (SignDatePolicy.crossesLocalDay(startedAt, now)) {
                 ScheduleTelemetry(context).crossDayAttempt()
