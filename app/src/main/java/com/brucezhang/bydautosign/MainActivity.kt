@@ -23,6 +23,13 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
+    override fun onStart() {
+        super.onStart()
+        // Opening the app is also a recovery opportunity once today's daily
+        // start time has passed; the coordinator still owns deduplication.
+        SignScheduler.onOpportunity(applicationContext, SignTrigger.APP_FOREGROUND)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Restore alarms on first launch or after an app update without Root.
@@ -54,6 +61,7 @@ internal data class NativeUiState(
     val sessionReady: Boolean = false,
     val sessionError: String = "",
     val authorizationRefresh: String = "",
+    val dayPhase: SignDayPhase = SignDayPhase.WAITING_TIME,
     val autoRefreshStatus: AutoRefreshStatus = AutoRefreshStatus.NEVER,
     val autoRefreshCode: Int? = null,
     val autoRefreshAt: Long = 0L,
@@ -111,6 +119,7 @@ internal class NativeSignManager(private val context: android.content.Context) {
                     (store.lastAutoRefreshCode?.let { " (status=$it)" } ?: "") +
                     " · " + formatDateTime(store.lastAutoRefreshAt)
             else "等待首次自动刷新",
+            dayPhase = store.dayPhase,
             autoRefreshStatus = store.lastAutoRefreshStatus,
             autoRefreshCode = store.lastAutoRefreshCode,
             autoRefreshAt = store.lastAutoRefreshAt,
@@ -184,7 +193,11 @@ internal class NativeSignManager(private val context: android.content.Context) {
 
     suspend fun sign(): ActionResult = withContext(Dispatchers.IO) {
         val result = SignCoordinator.sign(context, SignOrigin.MANUAL)
-        if (result.ok) SignScheduler.afterResult(context, result)
+        if (result.ok || SignOpportunityPolicy.due(
+                SignStore(context).times, System.currentTimeMillis()
+            )) {
+            SignScheduler.afterResult(context, result)
+        }
         SignNotifier(context).notifyResult(result)
         result
     }
