@@ -12,6 +12,7 @@ internal enum class ScheduleEventType(val label: String) {
     HOOK_RECOVERED("微信 Hook 已连接，提前补签"),
     OPPORTUNITY("检测到可补签机会，已尝试调度"),
     AUTH_WAITING("签到等待微信授权恢复"),
+    WORK_FAILED("后台任务执行异常"),
     SCHEDULE_FAILED("闹钟注册失败"),
     WORK_QUEUED("签到任务已提交"),
     SKIPPED_SIGNED("今日已签到，跳过"),
