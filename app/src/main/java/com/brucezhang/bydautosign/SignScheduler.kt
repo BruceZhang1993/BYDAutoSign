@@ -178,26 +178,41 @@ internal object SignScheduler {
     }
 
     /**
-     * Hook registration is not an alarm. It only unlocks an already-failed
-     * same-day automatic attempt; it must never start tomorrow's sign early.
+     * All non-timer opportunities use the same gate. A WeChat foreground event
+     * after today's configured time is sufficient even when no earlier alarm
+     * reached the worker. Connection registration alone never starts early.
      */
     @Synchronized
-    fun onHookConnected(context: Context) {
+    fun onOpportunity(context: Context, trigger: SignTrigger) {
+        if (trigger == SignTrigger.MANUAL || trigger == SignTrigger.ALARM) return
         val store = SignStore(context)
         val now = System.currentTimeMillis()
-        if (!HookRecoveryPolicy.shouldResume(
-                store.enabled, store.signedToday(), now, store.lastAutoRefreshAt,
-                store.lastAutoRefreshStatus, store.lastRun, store.retryAt,
-                store.lastHookRecoveryAt
+        if (!SignOpportunityPolicy.shouldDispatch(
+                enabled = store.enabled, signedToday = store.signedToday(),
+                time = store.times, now = now, phase = store.dayPhase,
+                lastRunAt = store.lastRun,
+                lastStartedAt = store.lastDayStartedAt,
+                lastOpportunityAt = store.lastSignOpportunityAt
             )) return
-        // Mark before enqueueing to make duplicate Hook registrations idempotent.
-        store.lastHookRecoveryAt = now
-        runCatching {
-            ScheduleEventLog(context).append(
-                ScheduleEventType.HOOK_RECOVERED, ScheduleEventSource.HOOK
-            )
+
+        store.lastSignOpportunityAt = now
+        val source = when (trigger) {
+            SignTrigger.HOOK_CONNECTED -> ScheduleEventSource.HOOK
+            SignTrigger.WECHAT_FOREGROUND -> ScheduleEventSource.WECHAT_FOREGROUND
+            else -> ScheduleEventSource.APP_FOREGROUND
         }
-        enqueue(context, ScheduleEventSource.HOOK)
+        runCatching {
+            ScheduleEventLog(context).append(ScheduleEventType.OPPORTUNITY, source)
+        }
+
+        // Maintain the hourly fallback even if the alarm never fired.
+        if (store.retryAt <= now ||
+            SignDatePolicy.completedLocalDate(store.retryAt) !=
+                SignDatePolicy.completedLocalDate(now)) {
+            store.retryAt = DailySchedulePolicy.retryAfter(ZonedDateTime.now())
+            reschedule(context)
+        }
+        enqueue(context, source)
     }
 
     fun onAlarm(context: Context, received: Intent) {
@@ -293,7 +308,11 @@ internal object SignScheduler {
 /** Explicit, app-private signal sent after the authenticated Binder registers. */
 class HookRecoveryReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        SignScheduler.onHookConnected(context)
+        val source = when (intent.getStringExtra("source")) {
+            "foreground" -> SignTrigger.WECHAT_FOREGROUND
+            else -> SignTrigger.HOOK_CONNECTED
+        }
+        SignScheduler.onOpportunity(context, source)
     }
 }
 
@@ -356,6 +375,14 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         })
         val done = SignScheduler.afterResult(applicationContext, response,
             inputData.getString("scheduled_local_day"))
+        if (response.awaitingAuthorization) {
+            runCatching {
+                ScheduleEventLog(applicationContext).append(
+                    ScheduleEventType.AUTH_WAITING, ScheduleEventSource.WORKER,
+                    response.failure
+                )
+            }
+        }
         // Retry failures are intermediate events; avoid hourly notification spam.
         if (done) SignNotifier(applicationContext).notifyResult(response)
         Result.success()
