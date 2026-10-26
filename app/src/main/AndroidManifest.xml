@@ -30,6 +30,7 @@
         </activity>
         <service android:name=".ipc.IpcBrokerService" android:exported="true" />
 
+        <receiver android:name=".HookRecoveryReceiver" android:exported="false" />
         <receiver android:name=".SignAlarmReceiver" android:exported="false" />
         <receiver android:name=".SignRescheduleReceiver" android:exported="false">
             <intent-filter>
