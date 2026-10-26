@@ -66,6 +66,17 @@ class SignDayStateTest {
             SignOpportunityPolicy.phaseAfter(false, false))
     }
 
+    @Test fun failedAttemptCrossingMidnightMustNotPoisonNextDaysPhase() {
+        val started = at(27, 23, 59)
+        val ended = at(28, 0, 1)
+        assertEquals(SignDayPhase.WAITING_TIME,
+            SignOpportunityPolicy.phaseAfter(false, true, started, ended, zone))
+        assertEquals(SignDayPhase.WAITING_TIME,
+            SignOpportunityPolicy.phaseAfter(false, false, started, ended, zone))
+        assertEquals(SignDayPhase.COMPLETE,
+            SignOpportunityPolicy.phaseAfter(true, false, started, ended, zone))
+    }
+
     @Test fun newLocalDayDoesNotInheritPreviousDaysCooldownOrOutcome() {
         assertTrue(allowed(now = at(28, 0, 11), lastRun = at(27, 23, 59),
             lastOpportunityAt = at(27, 23, 59)))
