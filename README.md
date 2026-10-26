@@ -9,6 +9,7 @@ BYD Auto Sign is an unofficial Android app that automatically checks in to the B
 ## Features
 
 - **Automatic daily check-ins:** Set one daily start time; unsuccessful attempts retry hourly until the day ends.
+- **Automatic catch-up when WeChat opens:** If the scheduled time has passed, the WeChat foreground or secure hook reconnect can automatically retry today's incomplete sign-in.
 - **One-tap check-in:** Check in manually from the home screen.
 - **Check-in history:** See recent results and understandable failure messages.
 - **Result notifications:** Get notified after a first successful check-in or a final failure, without alerts for repeated completed check-ins.
