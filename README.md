@@ -66,7 +66,7 @@ Enable notification permission if you want result alerts. Disabling notification
 Daily check-ins themselves do not use Root. A functioning LSPosed environment is still required for WeChat authorization and may require Root to set up.
 
 **Must WeChat stay running in the background?**  
-A running WeChat process and connected LSPosed hook make daily session refresh more reliable. A disconnected Binder gets a bounded 12-second reconnect grace period, and a busy login request gets one short retry. If WeChat was terminated, Android cannot reliably launch it silently without Root: the app uses any saved session and follows the normal hourly retry schedule. The home screen now shows the last refresh stage and safe status code.
+A running WeChat process and connected LSPosed hook make daily session refresh more reliable. A disconnected Binder gets a bounded 12-second reconnect grace period, and a busy login request gets one short retry. If WeChat is killed, Android cannot reliably relaunch it silently without Root: the app falls back to its cached session and hourly retry. **If the hook subsequently reconnects after a failed check-in on the same day, the app schedules an early recovery attempt**, subject to a cooldown and the already-signed guard. The home and schedule history show the refresh and recovery state.
 
 **Authorization says WeChat is not connected. What should I do?**  
 Make sure WeChat is installed, the module is enabled in LSPosed, WeChat is selected in its scope and WeChat has been fully restarted. Open WeChat once, then try authorizing again. Some WeChat versions may not yet be compatible.
