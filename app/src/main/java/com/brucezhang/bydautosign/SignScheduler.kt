@@ -363,10 +363,17 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val response = runCatching {
             SignCoordinator.sign(applicationContext, SignOrigin.SCHEDULED, 1)
         }.getOrElse {
-            runCatching { SignHistory(applicationContext).append(SignHistoryEntry(
-                System.currentTimeMillis(), SignOrigin.SCHEDULED, SignRecordStatus.FAILED,
-                SignFailureKind.UNKNOWN)) }
-            ActionResult(false, "签到执行异常", failure = SignFailureKind.UNKNOWN)
+            // The worker crashed before it could confirm a BYD request;
+            // never fabricate a sign HTTP history entry.
+            runCatching {
+                store.markDayPhase(SignDayPhase.RETRY_PENDING)
+                ScheduleEventLog(applicationContext).append(
+                    ScheduleEventType.WORK_FAILED, ScheduleEventSource.WORKER,
+                    SignFailureKind.UNKNOWN
+                )
+            }
+            ActionResult(false, "签到执行异常",
+                failure = SignFailureKind.UNKNOWN, requestSent = false)
         }
         telemetry.finished(when {
             response.skipped -> "今日已签到，跳过"
