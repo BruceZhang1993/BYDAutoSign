@@ -107,6 +107,35 @@ class SessionRefreshTest {
         assertEquals(1, calls)
     }
 
+    @Test fun disconnectedHookCanTriggerSameDayCompensationWhenItReconnects() {
+        val now = at(27, 1)
+        val refresh = at(27, 0)
+        val failed = refresh + 12_000L
+        val retry = now + 60 * 60 * 1000L
+        fun mayResume(
+            enabled: Boolean = true, signed: Boolean = false,
+            status: AutoRefreshStatus = AutoRefreshStatus.BINDER_UNAVAILABLE,
+            lastRefresh: Long = refresh, lastRun: Long = failed,
+            nextRetry: Long = retry, lastRecovery: Long = 0L,
+            time: Long = now
+        ) = HookRecoveryPolicy.shouldResume(
+            enabled, signed, time, lastRefresh, status, lastRun, nextRetry, lastRecovery
+        )
+        assertTrue(mayResume())
+        assertFalse(mayResume(enabled = false))
+        assertFalse(mayResume(signed = true))
+        assertFalse(mayResume(status = AutoRefreshStatus.SUCCESS))
+        assertFalse(mayResume(lastRun = 0L))
+        assertFalse(mayResume(lastRun = refresh - 1L))
+        assertFalse(mayResume(nextRetry = now - 1L))
+        assertFalse(mayResume(lastRefresh = at(26)))
+        assertFalse(mayResume(lastRun = at(26)))
+        assertFalse(mayResume(nextRetry = at(28)))
+        assertFalse(mayResume(lastRecovery = now - 60_000L))
+        assertTrue(mayResume(lastRecovery = now - 16 * 60_000L))
+        assertTrue(mayResume(time = now + 16 * 60_000L, lastRecovery = now))
+    }
+
     @Test fun hookStatusCodesRemainTypedAndSecretFree() {
         assertEquals(AutoRefreshStatus.CODE_BUSY, AutoRefreshDiagnostics.fromCodeStatus(-100))
         assertEquals(AutoRefreshStatus.CODE_TIMEOUT, AutoRefreshDiagnostics.fromCodeStatus(-210))
