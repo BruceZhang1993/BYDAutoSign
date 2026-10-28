@@ -44,6 +44,7 @@ internal class SignStore(context: Context) {
         val bytes = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
         if (!prefs.edit().putString("session_v1", Base64.getEncoder().encodeToString(bytes))
                 .putLong("session_authorized_at", System.currentTimeMillis())
+                .remove("session_suspected_invalid_at")
                 .remove("automatic_block_kind").remove("automatic_block_at").commit()) {
             throw IllegalStateException("会话保存失败")
         }
@@ -60,11 +61,51 @@ internal class SignStore(context: Context) {
     }
 
     @Synchronized fun clearSession() {
-        prefs.edit().remove("session_v1").remove("session_authorized_at").commit()
+        prefs.edit().remove("session_v1").remove("session_authorized_at")
+            .remove("session_suspected_invalid_at").commit()
     }
 
     val lastAuthorizedAt: Long
         get() = prefs.getLong("session_authorized_at", 0L)
+
+    /** Heuristic only: do not erase the saved session on ret=50010. */
+    val sessionSuspectedInvalid: Boolean
+        get() = prefs.getLong("session_suspected_invalid_at", 0L) >= lastAuthorizedAt &&
+            prefs.getLong("session_suspected_invalid_at", 0L) > 0L
+
+    fun markSessionSuspectedInvalid(at: Long) {
+        prefs.edit().putLong("session_suspected_invalid_at", at).commit()
+    }
+
+    /** Old saved sessions and history remain compatible across upgrades. */
+    val dayPhase: SignDayPhase
+        get() {
+            if (signedToday()) return SignDayPhase.COMPLETE
+            if (prefs.getString("sign_phase_day", "") != SignDatePolicy.completedLocalDate(
+                    System.currentTimeMillis())) return SignDayPhase.WAITING_TIME
+            return runCatching {
+                enumValueOf<SignDayPhase>(prefs.getString("sign_phase", "") ?: "")
+            }.getOrDefault(SignDayPhase.WAITING_TIME)
+        }
+
+    val lastDayStartedAt: Long
+        get() = prefs.getLong("sign_phase_started", 0L)
+
+    fun markDayPhase(phase: SignDayPhase, at: Long = System.currentTimeMillis()) {
+        val edit = prefs.edit()
+            .putString("sign_phase_day", SignDatePolicy.completedLocalDate(at))
+            .putString("sign_phase", phase.name)
+        if (phase == SignDayPhase.RUNNING) edit.putLong("sign_phase_started", at)
+        check(edit.commit()) { "无法保存当天签到状态" }
+    }
+
+    var lastSignOpportunityAt: Long
+        get() = prefs.getLong("sign_opportunity_at", 0L)
+        set(value) {
+            check(prefs.edit().putLong("sign_opportunity_at", value).commit()) {
+                "无法保存恢复调度时间"
+            }
+        }
 
     val lastAutoRefreshAt: Long
         get() = prefs.getLong("auto_refresh_at", 0L)
@@ -169,7 +210,9 @@ internal data class ActionResult(
     val message: String,
     val retry: Boolean = false,
     val failure: SignFailureKind = SignFailureKind.NONE,
-    val skipped: Boolean = false
+    val skipped: Boolean = false,
+    val awaitingAuthorization: Boolean = false,
+    val requestSent: Boolean = true
 )
 
 /** Use the response completion instant, not the request start day, for the signed marker. */
@@ -197,28 +240,30 @@ internal object SignCoordinator {
                 true, "今日已签到，自动跳过", skipped = true
             )
             val startedAt = System.currentTimeMillis()
-            val sessionResult = runCatching { store.session() }
-            val outcome = FreshSessionSigner(
-                refresh = { AutoSessionRefresher.refresh(context, engine) },
-                sign = { engine.sign(it) }
-            ).execute(
-                cachedSession = sessionResult.getOrNull(),
-                lastAuthorizedAt = store.lastAuthorizedAt,
-                now = startedAt,
-                missingFailure = if (sessionResult.isFailure)
-                    SignFailureKind.SESSION_UNREADABLE else SignFailureKind.NO_SESSION
-            )
+            store.markDayPhase(SignDayPhase.RUNNING, startedAt)
+            val signedAttempt = AuthorizationManager.sign(context, store, engine, startedAt)
+            val outcome = signedAttempt.outcome
             // Capture time *after* the response. A request crossing midnight must
             // not leave the new day unsigned and trigger a second scheduled request.
             val now = System.currentTimeMillis()
+            val awaitingAuthorization = AuthorizationManager.awaitingAuthorization(outcome)
             if (outcome.success) {
                 store.signedDate = SignDatePolicy.completedLocalDate(now)
                 store.clearAutomaticBlock()
                 if (!outcome.alreadySigned) store.streak = outcome.days
             } else {
-                if (outcome.authorizationExpired) store.clearSession()
-                if (!outcome.shouldRetry) store.markAutomaticBlock(outcome.failure, now)
+                // ret=50010 is not a proven expiry signal, so retain encrypted
+                // credentials while preventing futile hourly submissions.
+                if (outcome.businessCode == 50010 || outcome.authorizationExpired) {
+                    store.markSessionSuspectedInvalid(now)
+                }
+                if (!outcome.shouldRetry && !awaitingAuthorization) {
+                    store.markAutomaticBlock(outcome.failure, now)
+                }
             }
+            store.markDayPhase(SignOpportunityPolicy.phaseAfter(
+                outcome.success, awaitingAuthorization, startedAt, now
+            ), now)
             if (SignDatePolicy.crossesLocalDay(startedAt, now)) {
                 ScheduleTelemetry(context).crossDayAttempt()
             }
@@ -234,16 +279,22 @@ internal object SignCoordinator {
             }
             store.lastRun = now
             store.lastResult = message
-            // The bounded ledger stores enum values only, never BYD response text.
-            runCatching {
-                SignHistory(context).append(SignHistoryEntry(
-                    now, origin, status, outcome.failure, attempt,
-                    businessCode = outcome.businessCode,
-                    serverMessage = outcome.serverMessage,
-                    httpStatus = outcome.httpStatus
-                ))
+            // Only record an actual BYD sign request in SignHistory. Waiting
+            // for a WeChat code is a scheduler/auth event, not a sign failure.
+            if (signedAttempt.requestSent) {
+                runCatching {
+                    SignHistory(context).append(SignHistoryEntry(
+                        now, origin, status, outcome.failure, attempt,
+                        businessCode = outcome.businessCode,
+                        serverMessage = outcome.serverMessage,
+                        httpStatus = outcome.httpStatus
+                    ))
+                }
             }
-            ActionResult(outcome.success, message, outcome.shouldRetry,
-                outcome.failure, skipped = outcome.alreadySigned)
+            ActionResult(outcome.success, message,
+                retry = outcome.shouldRetry || awaitingAuthorization,
+                failure = outcome.failure, skipped = outcome.alreadySigned,
+                awaitingAuthorization = awaitingAuthorization,
+                requestSent = signedAttempt.requestSent)
         }
 }

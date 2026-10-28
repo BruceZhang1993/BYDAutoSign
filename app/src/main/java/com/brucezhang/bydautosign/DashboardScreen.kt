@@ -503,6 +503,7 @@ private fun TodaySummary(
     val statusTitle = when {
         state.signedToday -> "今日已签到"
         !state.sessionReady -> "需要初始化授权"
+        state.dayPhase == SignDayPhase.WAITING_AUTH -> "等待微信授权恢复"
         latestFailureToday -> "最近签到未成功"
         !state.enabled -> "自动签到已暂停"
         else -> "等待今日签到"
@@ -510,6 +511,8 @@ private fun TodaySummary(
     val statusDetail = when {
         state.signedToday -> "今日签到完成，不再安排当天任务；明天按设定时间继续"
         !state.sessionReady -> "完成微信授权后，才能进行签到"
+        state.dayPhase == SignDayPhase.WAITING_AUTH ->
+            "已到签到时间，等待微信 Hook 连接。打开微信后会自动补签，仍保留每小时兜底。"
         latestFailureToday -> state.lastResult
         !state.enabled -> "定时任务已关闭，仍可手动签到"
         else -> "自动签到已准备就绪"

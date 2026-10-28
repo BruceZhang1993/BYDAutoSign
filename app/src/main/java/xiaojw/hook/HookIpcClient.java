@@ -10,6 +10,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.util.Log;
 import org.json.JSONObject;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,6 +39,8 @@ public final class HookIpcClient {
     // Main-thread state: retry a failed registration, but never tear down
     // a healthy newly registered connection because of an older timer.
     private boolean registered = false;
+    private boolean pendingForeground = false;
+    private long lastForegroundNoticeAt = 0L;
     private volatile IHookBroker broker;
     private void requireModuleCaller() {
         AppOpsManager ops = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
@@ -119,6 +122,10 @@ public final class HookIpcClient {
                     main.post(() -> {
                         if (broker != current) return;
                         registered = true;
+                        if (pendingForeground) {
+                            pendingForeground = false;
+                            postForegroundSignal(current);
+                        }
                         if (retryScheduled) {
                             main.removeCallbacks(retryRunnable);
                             retryScheduled = false;
@@ -175,6 +182,37 @@ public final class HookIpcClient {
 
     public void start() {
         main.post(this::bindNow);
+    }
+
+    /**
+     * Called by Application lifecycle callbacks. Only a small, debounced
+     * notification is sent, with no activity name or user data.
+     */
+    public void onWeChatForeground() {
+        main.post(() -> {
+            long now = SystemClock.elapsedRealtime();
+            if (lastForegroundNoticeAt > 0L &&
+                    now - lastForegroundNoticeAt < 30_000L) return;
+            lastForegroundNoticeAt = now;
+            IHookBroker current = broker;
+            if (!registered || current == null) {
+                pendingForeground = true;
+                return;
+            }
+            postForegroundSignal(current);
+        });
+    }
+
+    private void postForegroundSignal(IHookBroker target) {
+        new Thread(() -> {
+            try {
+                target.notifyForeground();
+            } catch (RemoteException | SecurityException error) {
+                // Existing ServiceConnection is responsible for rebinding.
+                Log.w(TAG, "Foreground signal failed: " +
+                        error.getClass().getSimpleName());
+            }
+        }, "byd-ipc-foreground").start();
     }
 
     private void bindNow() {

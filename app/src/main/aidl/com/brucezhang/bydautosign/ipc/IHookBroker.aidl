@@ -6,4 +6,6 @@ import com.brucezhang.bydautosign.ipc.IHookEndpoint;
 interface IHookBroker {
     void registerHook(IHookEndpoint endpoint, int protocolVersion);
     void unregisterHook(IHookEndpoint endpoint);
+    // Authenticated WeChat UI became foreground; contains no activity details.
+    void notifyForeground();
 }

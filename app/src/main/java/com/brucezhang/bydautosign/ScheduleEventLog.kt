@@ -10,6 +10,9 @@ internal enum class ScheduleEventType(val label: String) {
     MISSED_WAKE("计划时间未收到闹钟唤醒"),
     RETRY_PLANNED("签到失败，已安排每小时重试"),
     HOOK_RECOVERED("微信 Hook 已连接，提前补签"),
+    OPPORTUNITY("检测到可补签机会，已尝试调度"),
+    AUTH_WAITING("签到等待微信授权恢复"),
+    WORK_FAILED("后台任务执行异常"),
     SCHEDULE_FAILED("闹钟注册失败"),
     WORK_QUEUED("签到任务已提交"),
     SKIPPED_SIGNED("今日已签到，跳过"),
@@ -18,7 +21,7 @@ internal enum class ScheduleEventType(val label: String) {
 }
 internal enum class ScheduleEventSource(val label: String) {
     ALARM("定时闹钟"), COMPENSATION("补偿调度"), WORKER("后台任务"),
-    HOOK("微信 Hook")
+    HOOK("微信 Hook"), WECHAT_FOREGROUND("打开微信"), APP_FOREGROUND("打开应用")
 }
 internal data class ScheduleEventEntry(
     val timestamp: Long,

@@ -60,17 +60,18 @@ public final class IpcBrokerService extends Service {
                 deathRecipient = recipient;
             }
             signalConnectionChanged();
-            // The caller has passed UID/AppOps verification. Hand off any
-            // same-day failed-sign recovery to an app-private receiver; do
-            // not enqueue WorkManager tasks on this Binder thread.
-            try {
-                Intent recovery = new Intent();
-                recovery.setClassName(getPackageName(),
-                        getPackageName() + ".HookRecoveryReceiver");
-                sendBroadcast(recovery);
-            } catch (RuntimeException ignored) {
-                // Binder registration remains valid even if optional recovery fails.
+            sendRecoverySignal("connected");
+        }
+
+        @Override
+        public void notifyForeground() {
+            final int uid = Binder.getCallingUid();
+            assertWeChatCaller(uid);
+            synchronized (lock) {
+                if (registeredUid != uid || endpoint == null ||
+                    !endpoint.asBinder().isBinderAlive()) return;
             }
+            sendRecoverySignal("foreground");
         }
 
         @Override
@@ -85,6 +86,18 @@ public final class IpcBrokerService extends Service {
             }
         }
     };
+
+    private void sendRecoverySignal(String source) {
+        try {
+            Intent event = new Intent();
+            event.setClassName(getPackageName(),
+                    getPackageName() + ".HookRecoveryReceiver");
+            event.putExtra("source", source);
+            sendBroadcast(event);
+        } catch (RuntimeException ignored) {
+            // Never fail authenticated IPC registration due to a wakeup hint.
+        }
+    }
 
     private void assertWeChatCaller(int uid) {
         // AppOps validates UID->package ownership in system_server even when

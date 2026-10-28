@@ -1,6 +1,7 @@
 package xiaojw.hook;
 
 import android.app.Application;
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -8,6 +9,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.Bundle;
 import android.os.UserHandle;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -31,6 +33,7 @@ public class WxLoginHook implements IXposedHookLoadPackage {
     private static final String SP_KEY_VERSION_CONFIG = "version_config";
 
     private HookIpcClient ipcClient;
+    private boolean foregroundObserverInstalled = false;
     // 用 CAS 保证并发登录请求串行化,避免 check-then-act 竞态
     private final java.util.concurrent.atomic.AtomicBoolean isLoginInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
     private Context appContext;
@@ -313,7 +316,37 @@ public class WxLoginHook implements IXposedHookLoadPackage {
                         });
                     ipcClient.start();
                 }
+                if (param.thisObject instanceof Application) {
+                    observeWeChatForeground((Application) param.thisObject);
+                }
             }
+        });
+    }
+
+    /**
+     * Framework lifecycle API does not depend on WeChat's obfuscated
+     * Activity classes. Runs only in the main process. Neither foreground
+     * callbacks nor IPC events directly execute a BYD network request.
+     */
+    private void observeWeChatForeground(Application app) {
+        if (foregroundObserverInstalled) return;
+        foregroundObserverInstalled = true;
+        app.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+            private int startedActivities = 0;
+
+            @Override public void onActivityCreated(Activity activity, Bundle saved) { }
+            @Override public void onActivityStarted(Activity activity) {
+                if (startedActivities++ == 0 && ipcClient != null) {
+                    ipcClient.onWeChatForeground();
+                }
+            }
+            @Override public void onActivityResumed(Activity activity) { }
+            @Override public void onActivityPaused(Activity activity) { }
+            @Override public void onActivityStopped(Activity activity) {
+                startedActivities = Math.max(0, startedActivities - 1);
+            }
+            @Override public void onActivitySaveInstanceState(Activity activity, Bundle out) { }
+            @Override public void onActivityDestroyed(Activity activity) { }
         });
     }
 
