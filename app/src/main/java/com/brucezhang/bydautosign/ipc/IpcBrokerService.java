@@ -9,6 +9,7 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.Looper;
+import android.os.SystemClock;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -23,6 +24,12 @@ public final class IpcBrokerService extends Service {
     public static final int PROTOCOL_VERSION = 1;
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static volatile IpcBrokerService running;
+    // The hook may be rebinding at the exact time a scheduled worker starts.
+    private static final Object connectionMonitor = new Object();
+
+    private static void signalConnectionChanged() {
+        synchronized (connectionMonitor) { connectionMonitor.notifyAll(); }
+    }
 
     private final Object lock = new Object();
     private IHookEndpoint endpoint;
@@ -51,6 +58,18 @@ public final class IpcBrokerService extends Service {
                 endpoint = callback;
                 registeredUid = uid;
                 deathRecipient = recipient;
+            }
+            signalConnectionChanged();
+            // The caller has passed UID/AppOps verification. Hand off any
+            // same-day failed-sign recovery to an app-private receiver; do
+            // not enqueue WorkManager tasks on this Binder thread.
+            try {
+                Intent recovery = new Intent();
+                recovery.setClassName(getPackageName(),
+                        getPackageName() + ".HookRecoveryReceiver");
+                sendBroadcast(recovery);
+            } catch (RuntimeException ignored) {
+                // Binder registration remains valid even if optional recovery fails.
             }
         }
 
@@ -92,6 +111,7 @@ public final class IpcBrokerService extends Service {
     public void onCreate() {
         super.onCreate();
         running = this;
+        signalConnectionChanged();
     }
 
     @Override
@@ -105,6 +125,7 @@ public final class IpcBrokerService extends Service {
     public void onDestroy() {
         synchronized (lock) { forgetLocked(); }
         running = null;
+        signalConnectionChanged();
         super.onDestroy();
     }
 
@@ -174,9 +195,9 @@ public final class IpcBrokerService extends Service {
     }
 
     /**
-     * Local-only API, invoked from BYDAutoSign's explicit authorization UI
-     * on a worker thread. No public Binder method allows arbitrary clients
-     * to trigger a login.
+     * Local-only API, invoked from the app's manual authorization or opted-in
+     * scheduled refresh on a worker thread. External apps cannot use this
+     * internal method to trigger a login.
      */
     public static CodeResult obtainCode(String appId) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -217,6 +238,30 @@ public final class IpcBrokerService extends Service {
         } catch (RemoteException | SecurityException remoteError) {
             return new CodeResult(-605, "");
         }
+    }
+
+    /**
+     * Allow a bounded grace period for the existing WeChat Hook to reconnect.
+     * This does NOT start WeChat, invoke Root, or hold the service alive.
+     * Always call from a worker thread, never the main thread.
+     */
+    public static boolean awaitConnected(long timeoutMillis) {
+        if (connected()) return true;
+        if (Looper.myLooper() == Looper.getMainLooper()) return false;
+        long remaining = Math.max(0L, Math.min(timeoutMillis, 20_000L));
+        long deadline = SystemClock.elapsedRealtime() + remaining;
+        synchronized (connectionMonitor) {
+            while (!connected() && remaining > 0) {
+                try {
+                    connectionMonitor.wait(remaining);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+                remaining = deadline - SystemClock.elapsedRealtime();
+            }
+        }
+        return connected();
     }
 
     public static boolean connected() {

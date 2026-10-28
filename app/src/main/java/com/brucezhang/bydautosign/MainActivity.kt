@@ -53,6 +53,10 @@ internal data class NativeUiState(
     val hookInfo: String = "",
     val sessionReady: Boolean = false,
     val sessionError: String = "",
+    val authorizationRefresh: String = "",
+    val autoRefreshStatus: AutoRefreshStatus = AutoRefreshStatus.NEVER,
+    val autoRefreshCode: Int? = null,
+    val autoRefreshAt: Long = 0L,
     val enabled: Boolean = true,
     val times: String = "",
     val exact: Boolean = false,
@@ -102,6 +106,14 @@ internal class NativeSignManager(private val context: android.content.Context) {
                     "会话已过期，请重新授权；自动重试仍会按计划运行"
                 else -> ""
             },
+            authorizationRefresh = if (store.lastAutoRefreshAt > 0L)
+                "最近自动刷新：${store.lastAutoRefreshStatus.label}" +
+                    (store.lastAutoRefreshCode?.let { " (status=$it)" } ?: "") +
+                    " · " + formatDateTime(store.lastAutoRefreshAt)
+            else "等待首次自动刷新",
+            autoRefreshStatus = store.lastAutoRefreshStatus,
+            autoRefreshCode = store.lastAutoRefreshCode,
+            autoRefreshAt = store.lastAutoRefreshAt,
             enabled = store.enabled,
             times = store.times,
             exact = SignScheduler.exactAllowed(context),
@@ -125,10 +137,9 @@ internal class NativeSignManager(private val context: android.content.Context) {
             catch (_: Exception) {
                 return@withContext ActionResult(false, "微信无法启动，请手动打开微信后返回授权")
             }
-            repeat(15) {
-                if (IpcBrokerService.connected()) return@repeat
-                kotlinx.coroutines.delay(1000)
-            }
+            // Wait once for the newly launched WeChat Hook to bind.
+            // Unlike repeat/return@repeat, this returns immediately on connection.
+            IpcBrokerService.awaitConnected(15_000L)
         }
         if (!IpcBrokerService.connected()) {
             return@withContext ActionResult(false, "微信 Binder 未连接：请打开微信、确认 LSPosed 作用域后返回重试")

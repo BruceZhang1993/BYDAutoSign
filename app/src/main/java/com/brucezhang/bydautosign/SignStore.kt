@@ -43,6 +43,7 @@ internal class SignStore(context: Context) {
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val bytes = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
         if (!prefs.edit().putString("session_v1", Base64.getEncoder().encodeToString(bytes))
+                .putLong("session_authorized_at", System.currentTimeMillis())
                 .remove("automatic_block_kind").remove("automatic_block_at").commit()) {
             throw IllegalStateException("会话保存失败")
         }
@@ -59,7 +60,41 @@ internal class SignStore(context: Context) {
     }
 
     @Synchronized fun clearSession() {
-        prefs.edit().remove("session_v1").commit()
+        prefs.edit().remove("session_v1").remove("session_authorized_at").commit()
+    }
+
+    val lastAuthorizedAt: Long
+        get() = prefs.getLong("session_authorized_at", 0L)
+
+    val lastAutoRefreshAt: Long
+        get() = prefs.getLong("auto_refresh_at", 0L)
+
+    /** Debounces reconnect-triggered compensation; never stores any credentials. */
+    var lastHookRecoveryAt: Long
+        get() = prefs.getLong("hook_recovery_at", 0L)
+        set(value) {
+            check(prefs.edit().putLong("hook_recovery_at", value).commit()) {
+                "无法保存重连恢复时间"
+            }
+        }
+
+    val lastAutoRefreshStatus: AutoRefreshStatus
+        get() = runCatching {
+            enumValueOf<AutoRefreshStatus>(prefs.getString("auto_refresh_status", "") ?: "")
+        }.getOrDefault(AutoRefreshStatus.NEVER)
+
+    val lastAutoRefreshCode: Int?
+        get() = if (prefs.contains("auto_refresh_code")) {
+            AutoRefreshDiagnostics.safeCode(prefs.getInt("auto_refresh_code", 0))
+        } else null
+
+    fun recordAutoRefresh(status: AutoRefreshStatus, code: Int? = null) {
+        val edit = prefs.edit().putLong("auto_refresh_at", System.currentTimeMillis())
+            .putString("auto_refresh_status", status.name)
+        val safe = AutoRefreshDiagnostics.safeCode(code)
+        if (safe != null) edit.putInt("auto_refresh_code", safe)
+        else edit.remove("auto_refresh_code")
+        check(edit.commit()) { "无法保存授权刷新诊断" }
     }
 
     /** Automatic retries should stop after nonrecoverable errors, but manual sign remains available. */
@@ -163,13 +198,16 @@ internal object SignCoordinator {
             )
             val startedAt = System.currentTimeMillis()
             val sessionResult = runCatching { store.session() }
-            val outcome = when {
-                sessionResult.isFailure -> SignOutcome(false, "本地会话不可读取，请重新授权",
-                    failure = SignFailureKind.SESSION_UNREADABLE)
-                sessionResult.getOrNull() == null -> SignOutcome(false,
-                    "尚未授权，请先通过 Binder 获取会话", failure = SignFailureKind.NO_SESSION)
-                else -> engine.sign(requireNotNull(sessionResult.getOrNull()))
-            }
+            val outcome = FreshSessionSigner(
+                refresh = { AutoSessionRefresher.refresh(context, engine) },
+                sign = { engine.sign(it) }
+            ).execute(
+                cachedSession = sessionResult.getOrNull(),
+                lastAuthorizedAt = store.lastAuthorizedAt,
+                now = startedAt,
+                missingFailure = if (sessionResult.isFailure)
+                    SignFailureKind.SESSION_UNREADABLE else SignFailureKind.NO_SESSION
+            )
             // Capture time *after* the response. A request crossing midnight must
             // not leave the new day unsigned and trigger a second scheduled request.
             val now = System.currentTimeMillis()

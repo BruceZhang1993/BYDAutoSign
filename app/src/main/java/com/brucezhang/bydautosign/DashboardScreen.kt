@@ -238,9 +238,12 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                                         style = MaterialTheme.typography.titleSmall)
                                     Text(when {
                                         state.sessionError.isNotBlank() -> state.sessionError
-                                        state.sessionReady -> "已安全保存 · 签到不依赖微信在线"
+                                        state.sessionReady -> "已安全保存 · 每个签到日尝试后台刷新授权"
                                         else -> "请先通过微信获取授权，才能自动签到"
                                     }, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(state.authorizationRefresh,
+                                        style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
@@ -333,8 +336,11 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                         SectionCard {
                             SettingsInfoRow(Icons.Outlined.Security,
                                 if (state.sessionReady) "已授权" else "尚未授权",
-                                if (state.sessionReady) "会话已加密保存，日常签到无需启动微信"
-                                    else "需要完成一次微信授权以启用签到")
+                                if (state.sessionReady) "每日签到前优先通过微信 Hook 后台刷新授权，失败时尝试旧会话"
+                                    else "首次授权后，每个签到日会自动尝试刷新")
+                            Text(state.authorizationRefresh,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                             if (state.sessionError.isNotBlank()) {
                                 Text(state.sessionError, color = MaterialTheme.colorScheme.error,
                                     style = MaterialTheme.typography.bodySmall)
@@ -352,7 +358,7 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                         }
                     }
                     item {
-                        Text("LSPosed 仅用于手动授权。已停用 Root 签到运行链；旧 Root 任务需自行停用，以免重复签到。",
+                        Text("首次授权和后台自动刷新均使用 LSPosed Binder。微信进程未运行时无法保证自动刷新；不会通过 Root 或后台弹出微信。旧 Root 任务需自行停用。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp))
@@ -532,6 +538,15 @@ private fun TodaySummary(
                     Text(statusTitle, style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.SemiBold, color = fg)
                     Text(statusDetail, style = MaterialTheme.typography.bodyMedium, color = fg)
+                    // Keep the stage visible with the latest failed scheduled sign,
+                    // without scrolling down to the authorization section.
+                    val latest = state.history.firstOrNull()
+                    if (latestFailureToday && latest?.origin == SignOrigin.SCHEDULED &&
+                        state.autoRefreshAt > 0L && state.autoRefreshAt <= latest.timestamp &&
+                        latest.timestamp - state.autoRefreshAt < 180_000L) {
+                        Text(state.authorizationRefresh,
+                            style = MaterialTheme.typography.bodySmall, color = fg)
+                    }
                 }
             }
             HorizontalDivider(color = fg.copy(alpha = 0.18f))

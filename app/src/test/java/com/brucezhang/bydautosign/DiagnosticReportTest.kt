@@ -14,6 +14,10 @@ class DiagnosticReportTest {
             hookInfo = "dex:" + secret,
             sessionError = "error:" + secret,
             lastResult = "server:" + secret,
+            authorizationRefresh = "refresh:" + secret,
+            autoRefreshStatus = AutoRefreshStatus.HOOK_NOT_READY,
+            autoRefreshCode = -310,
+            autoRefreshAt = 1_234L,
             connected = true,
             sessionReady = true,
             times = "07:01",
@@ -38,6 +42,10 @@ class DiagnosticReportTest {
         assertEquals(35, json.getInt("androidApi"))
         assertTrue(json.getJSONObject("permissions").getBoolean("notificationsAllowed"))
         assertTrue(json.getJSONObject("authorization").getBoolean("sessionAvailable"))
+        val auth = json.getJSONObject("authorization")
+        assertEquals("HOOK_NOT_READY", auth.getString("lastAutoRefreshStatus"))
+        assertEquals(-310, auth.getInt("lastAutoRefreshCode"))
+        assertEquals(1_234L, auth.getLong("lastAutoRefreshMs"))
         assertEquals(1, json.getJSONArray("history").length())
         val event = json.getJSONArray("history").getJSONObject(0)
         assertEquals("NETWORK", event.getString("failure"))

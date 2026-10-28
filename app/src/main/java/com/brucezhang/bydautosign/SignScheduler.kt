@@ -177,6 +177,29 @@ internal object SignScheduler {
         runCatching { ScheduleEventLog(context).append(ScheduleEventType.WORK_QUEUED, source) }
     }
 
+    /**
+     * Hook registration is not an alarm. It only unlocks an already-failed
+     * same-day automatic attempt; it must never start tomorrow's sign early.
+     */
+    @Synchronized
+    fun onHookConnected(context: Context) {
+        val store = SignStore(context)
+        val now = System.currentTimeMillis()
+        if (!HookRecoveryPolicy.shouldResume(
+                store.enabled, store.signedToday(), now, store.lastAutoRefreshAt,
+                store.lastAutoRefreshStatus, store.lastRun, store.retryAt,
+                store.lastHookRecoveryAt
+            )) return
+        // Mark before enqueueing to make duplicate Hook registrations idempotent.
+        store.lastHookRecoveryAt = now
+        runCatching {
+            ScheduleEventLog(context).append(
+                ScheduleEventType.HOOK_RECOVERED, ScheduleEventSource.HOOK
+            )
+        }
+        enqueue(context, ScheduleEventSource.HOOK)
+    }
+
     fun onAlarm(context: Context, received: Intent) {
         val telemetry = ScheduleTelemetry(context)
         val planned = telemetry.snapshot().nextAt
@@ -264,6 +287,13 @@ internal object SignScheduler {
         store.enabled = enabled
         if (!enabled) WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         return reschedule(context)
+    }
+}
+
+/** Explicit, app-private signal sent after the authenticated Binder registers. */
+class HookRecoveryReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        SignScheduler.onHookConnected(context)
     }
 }
 

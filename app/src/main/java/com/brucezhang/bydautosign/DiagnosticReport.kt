@@ -62,7 +62,14 @@ internal object DiagnosticReport {
             .put("authorization", JSONObject()
                 .put("sessionAvailable", state.sessionReady)
                 .put("binderConnected", state.connected)
-                .put("hookReady", state.hookReady))
+                .put("hookReady", state.hookReady)
+                .put("lastAutoRefreshMs", state.autoRefreshAt.coerceAtLeast(0L))
+                .put("lastAutoRefreshStatus", state.autoRefreshStatus.name)
+                .apply {
+                    AutoRefreshDiagnostics.safeCode(state.autoRefreshCode)?.let {
+                        put("lastAutoRefreshCode", it)
+                    }
+                })
             .put("permissions", JSONObject()
                 .put("exactAlarmGranted", state.exact)
                 .put("notificationsAllowed", notificationsAllowed))
