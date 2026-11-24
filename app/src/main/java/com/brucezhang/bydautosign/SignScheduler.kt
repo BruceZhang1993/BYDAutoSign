@@ -69,7 +69,8 @@ internal object SignScheduler {
     private const val WORK_NAME = "native-daily-sign"
     private const val WATCHDOG_NAME = "native-alarm-watchdog"
     private const val EXTRA_EXPECTED = "schedule_due_at"
-    private const val WORK_DAY = "scheduled_local_day"
+    internal const val WORK_AT = "dispatch_at"
+    internal const val WORK_DAY = "scheduled_local_day"
 
     private fun intent(context: Context, at: Long = 0L): PendingIntent =
         PendingIntent.getBroadcast(context, REQUEST_ID,
@@ -120,15 +121,15 @@ internal object SignScheduler {
         val store = SignStore(context)
         val manager = context.getSystemService(AlarmManager::class.java)
         cancelOldSlotAlarms(context, store.rawTimes)
-        manager.cancel(intent(context))
         if (!store.enabled) {
+            manager.cancel(intent(context))
             WorkManager.getInstance(context).cancelUniqueWork(WATCHDOG_NAME)
             ScheduleTelemetry(context).planned(0L, false)
             return "自动签到已关闭"
         }
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            WATCHDOG_NAME, ExistingPeriodicWorkPolicy.KEEP,
-            PeriodicWorkRequestBuilder<SignWatchdogWorker>(12, TimeUnit.HOURS).build()
+            WATCHDOG_NAME, ExistingPeriodicWorkPolicy.UPDATE,
+            PeriodicWorkRequestBuilder<SignWatchdogWorker>(30, TimeUnit.MINUTES).build()
         )
         val now = ZonedDateTime.now()
         val plan = DailySchedulePolicy.next(store.times, now, store.signedToday(), store.retryAt)
@@ -139,7 +140,11 @@ internal object SignScheduler {
                     ScheduleEventType.SCHEDULE_FAILED, ScheduleEventSource.COMPENSATION) }
                 return "设置定时失败，请检查系统闹钟权限"
             }
-        ScheduleTelemetry(context).planned(plan.at, exact)
+        val telemetry = ScheduleTelemetry(context)
+        val previous = telemetry.snapshot()
+        telemetry.planned(plan.at, exact)
+        if (previous.nextAt != plan.at || previous.exact != exact)
+            record(context, ScheduleEventType.ALARM_REGISTERED, ScheduleEventSource.COMPENSATION)
         return "下次 ${DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(now.zone)
             .format(Instant.ofEpochMilli(plan.at))} · " +
             (if (plan.retry) "失败重试" else "每日签到") +
@@ -156,7 +161,8 @@ internal object SignScheduler {
         reschedule(context)
     }
 
-    fun enqueue(context: Context, source: ScheduleEventSource = ScheduleEventSource.COMPENSATION) {
+    @Synchronized
+    fun enqueue(context: Context, source: ScheduleEventSource = ScheduleEventSource.COMPENSATION, direct: Boolean = false) {
         val store = SignStore(context)
         if (!store.enabled) {
             runCatching { ScheduleEventLog(context).append(ScheduleEventType.SKIPPED_DISABLED, source) }
@@ -167,14 +173,47 @@ internal object SignScheduler {
             reschedule(context)
             return
         }
-        // Run the worker without a network constraint: offline is also a failure,
-        // and must schedule the one-hour retry instead of blocking indefinitely.
+        val day = LocalDate.now().toString()
+        val at = System.currentTimeMillis()
+        ScheduleTelemetry(context).enqueued(at)
+        if (direct && SignExecutionService.launch(context, day, at)) {
+            record(context, ScheduleEventType.SERVICE_REQUESTED, source)
+            return
+        }
+        if (direct) record(context, ScheduleEventType.SERVICE_FALLBACK, source)
+        fallback(context, day, at, source)
+    }
+
+    internal fun record(context: Context, type: ScheduleEventType, source: ScheduleEventSource,
+                        failure: SignFailureKind = SignFailureKind.NONE) {
+        runCatching { ScheduleEventLog(context).append(type, source, failure) }
+    }
+
+    internal fun fallback(context: Context, day: String, at: Long,
+                          source: ScheduleEventSource = ScheduleEventSource.COMPENSATION) {
         val request = OneTimeWorkRequestBuilder<SignWorker>()
-            .setInputData(workDataOf(WORK_DAY to LocalDate.now().toString()))
-            .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
-        ScheduleTelemetry(context).enqueued()
-        runCatching { ScheduleEventLog(context).append(ScheduleEventType.WORK_QUEUED, source) }
+            .setInputData(workDataOf(WORK_DAY to day, WORK_AT to at))
+            .addTag(WORK_NAME).build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "$WORK_NAME-$day-$at", ExistingWorkPolicy.KEEP, request)
+        record(context, ScheduleEventType.WORK_QUEUED, source)
+    }
+
+    fun wakeTest(context: Context): ActionResult {
+        val manager = context.getSystemService(AlarmManager::class.java)
+        val at = System.currentTimeMillis() + 120_000L
+        val probe = PendingIntent.getBroadcast(context, REQUEST_ID + 1,
+            Intent(context, SignAlarmReceiver::class.java).setAction("com.brucezhang.bydautosign.TEST_WAKE"),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return try {
+            if (exactAllowed(context)) manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, probe)
+            else manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, probe)
+            record(context, ScheduleEventType.TEST_REGISTERED, ScheduleEventSource.TEST)
+            ActionResult(true, "测试已安排在约两分钟后，请锁屏；稍后查看调度记录")
+        } catch (_: RuntimeException) {
+            record(context, ScheduleEventType.TEST_FAILED, ScheduleEventSource.TEST)
+            ActionResult(false, "测试闹钟注册失败")
+        }
     }
 
     /**
@@ -195,6 +234,10 @@ internal object SignScheduler {
                 lastOpportunityAt = store.lastSignOpportunityAt
             )) return
 
+        val authRecovery = store.dayPhase == SignDayPhase.WAITING_AUTH &&
+            (trigger == SignTrigger.HOOK_CONNECTED || trigger == SignTrigger.WECHAT_FOREGROUND)
+        if (!authRecovery && !DispatchRecoveryPolicy.isDue(store.times, ZonedDateTime.now(),
+                store.signedToday(), store.retryAt, maxOf(store.lastRun, store.lastDayStartedAt))) return
         store.lastSignOpportunityAt = now
         val source = when (trigger) {
             SignTrigger.HOOK_CONNECTED -> ScheduleEventSource.HOOK
@@ -212,10 +255,17 @@ internal object SignScheduler {
             store.retryAt = DailySchedulePolicy.retryAfter(ZonedDateTime.now())
             reschedule(context)
         }
-        enqueue(context, source)
+        enqueue(context, source, direct = trigger == SignTrigger.APP_FOREGROUND)
     }
 
+    @Synchronized
     fun onAlarm(context: Context, received: Intent) {
+        if (received.action == "com.brucezhang.bydautosign.TEST_WAKE") {
+            record(context, ScheduleEventType.TEST_ALARM_FIRED, ScheduleEventSource.TEST)
+            if (!SignExecutionService.launch(context, "", 0L, test = true))
+                record(context, ScheduleEventType.TEST_FAILED, ScheduleEventSource.TEST)
+            return
+        }
         val telemetry = ScheduleTelemetry(context)
         val planned = telemetry.snapshot().nextAt
         val due = received.getLongExtra(EXTRA_EXPECTED, 0L)
@@ -236,24 +286,25 @@ internal object SignScheduler {
         val now = ZonedDateTime.now()
         if (Instant.ofEpochMilli(due).atZone(now.zone).toLocalDate() != now.toLocalDate()) {
             // Yesterday's delayed retry must never submit an early request today.
-            reschedule(context)
+            recover(context, ScheduleRecoverySource.UNKNOWN, force = true)
             return
         }
         reserveRetry(context, now)
-        enqueue(context, ScheduleEventSource.ALARM)
+        enqueue(context, ScheduleEventSource.ALARM, direct = true)
     }
 
     /** A missed wake is compensated once; then failures follow the hourly policy. */
+    @Synchronized
     fun recover(context: Context, source: ScheduleRecoverySource, force: Boolean = false) {
         val store = SignStore(context)
         val telemetry = ScheduleTelemetry(context)
         val prior = telemetry.snapshot()
         val now = ZonedDateTime.now()
         val at = now.toInstant().toEpochMilli()
-        val stale = store.enabled && prior.nextAt > 0L && at >= prior.nextAt &&
-            !store.signedToday() &&
-            Instant.ofEpochMilli(prior.nextAt).atZone(now.zone).toLocalDate() == now.toLocalDate() &&
-            prior.lastAlarmAt < prior.nextAt
+        val stale = store.enabled && DispatchRecoveryPolicy.isDue(store.times, now,
+            store.signedToday(), store.retryAt, maxOf(store.lastRun, store.lastDayStartedAt)) &&
+            (force || prior.nextAt <= 0L || prior.nextAt > at ||
+                SignRecoveryPolicy.planOverdue(prior.nextAt, at))
         val permissionChanged = store.enabled && prior.nextAt > 0L &&
             SignRecoveryPolicy.permissionChanged(prior.exact, exactAllowed(context))
         if (stale) {
@@ -263,7 +314,8 @@ internal object SignScheduler {
             // foreground refreshes from enqueuing multiple check-in attempts.
             reserveRetry(context, now)
             telemetry.compensation()
-            enqueue(context)
+            enqueue(context, direct = source == ScheduleRecoverySource.APP_START ||
+                source == ScheduleRecoverySource.FOREGROUND)
         } else if (force || prior.nextAt <= 0L || permissionChanged ||
             (store.enabled && SignRecoveryPolicy.planOverdue(prior.nextAt, at))) {
             runCatching {
@@ -276,6 +328,7 @@ internal object SignScheduler {
     }
 
     /** Called on scheduled completion or successful manual sign, never on each UI refresh. */
+    @Synchronized
     fun afterResult(context: Context, response: ActionResult,
                     scheduledDay: String? = null): Boolean {
         val store = SignStore(context)
@@ -294,13 +347,23 @@ internal object SignScheduler {
         return response.ok || store.retryAt == 0L
     }
 
+    @Synchronized
     fun configure(context: Context, enabled: Boolean, time: String): String {
         val normalized = ScheduleTimes.normalize(time) ?: return "请选择一个有效签到时间（HH:mm）"
         val store = SignStore(context)
         store.times = normalized
         store.retryAt = 0L
         store.enabled = enabled
-        if (!enabled) WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+        val wm = WorkManager.getInstance(context)
+        wm.cancelUniqueWork(WORK_NAME)
+        wm.cancelAllWorkByTag(WORK_NAME)
+        ScheduleTelemetry(context).enqueued(System.currentTimeMillis())
+        if (enabled && DispatchRecoveryPolicy.isDue(normalized, ZonedDateTime.now(),
+                store.signedToday(), 0L, 0L)) {
+            reserveRetry(context, ZonedDateTime.now())
+            enqueue(context, ScheduleEventSource.APP_FOREGROUND, direct = true)
+            return "今日签到时间已到，已提交补签"
+        }
         return reschedule(context)
     }
 }
@@ -339,29 +402,48 @@ class SignRescheduleReceiver : BroadcastReceiver() {
 
 class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        ScheduledSignExecution.run(applicationContext,
+            inputData.getString(SignScheduler.WORK_DAY).orEmpty(),
+            inputData.getLong(SignScheduler.WORK_AT, 0L), ScheduleEventSource.WORKER)
+        Result.success()
+    }
+}
+
+internal object ScheduledSignExecution {
+    private val running = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun run(applicationContext: Context, day: String, at: Long, source: ScheduleEventSource) {
+        if (!running.compareAndSet(false, true)) return
+        try { execute(applicationContext, day, at, source) }
+        finally { running.set(false) }
+    }
+
+    private fun execute(applicationContext: Context, day: String, at: Long, source: ScheduleEventSource) {
         val telemetry = ScheduleTelemetry(applicationContext)
         val store = SignStore(applicationContext)
         if (!store.enabled) {
             telemetry.finished("自动签到已关闭")
             runCatching { ScheduleEventLog(applicationContext).append(
                 ScheduleEventType.SKIPPED_DISABLED, ScheduleEventSource.WORKER) }
-            return@withContext Result.success()
+            return
         }
-        if (inputData.getString("scheduled_local_day") != LocalDate.now().toString()) {
+        if (!DispatchRecoveryPolicy.ticketValid(day, at, System.currentTimeMillis(),
+                telemetry.snapshot().lastEnqueueAt, store.times) || store.lastRun > at) {
             // An old queued job is not allowed to sign on the next day before its anchor.
-            SignScheduler.reschedule(applicationContext)
-            return@withContext Result.success()
+            SignScheduler.record(applicationContext, ScheduleEventType.STALE_TICKET, source)
+            return
         }
         if (store.signedToday()) {
             telemetry.finished("今日已签到，跳过")
             runCatching { ScheduleEventLog(applicationContext).append(
                 ScheduleEventType.SKIPPED_SIGNED, ScheduleEventSource.WORKER) }
             SignScheduler.reschedule(applicationContext)
-            return@withContext Result.success()
+            return
         }
         telemetry.started()
+        SignScheduler.record(applicationContext, ScheduleEventType.EXECUTION_STARTED, source)
         val response = runCatching {
-            SignCoordinator.sign(applicationContext, SignOrigin.SCHEDULED, 1)
+            SignCoordinator.sign(applicationContext, SignOrigin.SCHEDULED, 1, day, at)
         }.getOrElse {
             // The worker crashed before it could confirm a BYD request;
             // never fabricate a sign HTTP history entry.
@@ -375,13 +457,18 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             ActionResult(false, "签到执行异常",
                 failure = SignFailureKind.UNKNOWN, requestSent = false)
         }
+        if (response.skipped && !response.ok) {
+            telemetry.finished("调度已过期")
+            SignScheduler.record(applicationContext, ScheduleEventType.STALE_TICKET, source)
+            return
+        }
         telemetry.finished(when {
             response.skipped -> "今日已签到，跳过"
             response.ok -> "签到成功"
             else -> "签到失败 · ${response.failure.label}"
         })
-        val done = SignScheduler.afterResult(applicationContext, response,
-            inputData.getString("scheduled_local_day"))
+        SignScheduler.record(applicationContext, ScheduleEventType.EXECUTION_FINISHED, source, response.failure)
+        val done = SignScheduler.afterResult(applicationContext, response, day)
         if (response.awaitingAuthorization) {
             runCatching {
                 ScheduleEventLog(applicationContext).append(
@@ -392,7 +479,6 @@ class SignWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         }
         // Retry failures are intermediate events; avoid hourly notification spam.
         if (done) SignNotifier(applicationContext).notifyResult(response)
-        Result.success()
     }
 }
 
@@ -402,4 +488,25 @@ class SignWatchdogWorker(context: Context, params: WorkerParameters) : Coroutine
         SignScheduler.recover(applicationContext, ScheduleRecoverySource.WATCHDOG, force = true)
         Result.success()
     }
+}
+
+/** A missed initial slot is recoverable; a future same-day retry is authoritative. */
+internal object DispatchRecoveryPolicy {
+    fun isDue(time: String, now: ZonedDateTime, signed: Boolean, retryAt: Long,
+              lastAttemptAt: Long): Boolean {
+        val ms = now.toInstant().toEpochMilli()
+        if (signed || !SignOpportunityPolicy.due(time, ms, now.zone)) return false
+        val today = now.toLocalDate().toString()
+        if (retryAt > 0L && SignDatePolicy.completedLocalDate(retryAt, now.zone) == today)
+            return ms >= retryAt
+        return lastAttemptAt <= 0L || lastAttemptAt > ms ||
+            SignDatePolicy.completedLocalDate(lastAttemptAt, now.zone) != today
+    }
+
+    fun ticketValid(day: String, at: Long, now: Long, latest: Long, time: String,
+                    zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): Boolean =
+        at > 0L && at <= now && at == latest &&
+            SignDatePolicy.completedLocalDate(at, zone) == day &&
+            SignDatePolicy.completedLocalDate(now, zone) == day &&
+            SignOpportunityPolicy.due(time, now, zone)
 }
