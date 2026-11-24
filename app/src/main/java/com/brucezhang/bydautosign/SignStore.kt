@@ -232,7 +232,8 @@ internal object SignCoordinator {
     private val lock = Any()
     private val engine by lazy { NativeSignEngine() }
 
-    fun sign(context: Context, origin: SignOrigin = SignOrigin.MANUAL, attempt: Int = 1): ActionResult =
+    fun sign(context: Context, origin: SignOrigin = SignOrigin.MANUAL, attempt: Int = 1,
+             scheduledDay: String? = null, dispatchAt: Long = 0L): ActionResult =
         synchronized(lock) {
             val store = SignStore(context)
             // No actual sign attempt: neither history entry nor notification.
@@ -240,6 +241,12 @@ internal object SignCoordinator {
                 true, "今日已签到，自动跳过", skipped = true
             )
             val startedAt = System.currentTimeMillis()
+            if (scheduledDay != null && (!store.enabled ||
+                    !DispatchRecoveryPolicy.ticketValid(scheduledDay, dispatchAt, startedAt,
+                        ScheduleTelemetry(context).snapshot().lastEnqueueAt, store.times) ||
+                    store.lastRun > dispatchAt)) {
+                return@synchronized ActionResult(false, "调度已过期", skipped = true, requestSent = false)
+            }
             store.markDayPhase(SignDayPhase.RUNNING, startedAt)
             val signedAttempt = AuthorizationManager.sign(context, store, engine, startedAt)
             val outcome = signedAttempt.outcome
