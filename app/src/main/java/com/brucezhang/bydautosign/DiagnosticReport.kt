@@ -72,6 +72,7 @@ internal object DiagnosticReport {
                 })
             .put("permissions", JSONObject()
                 .put("exactAlarmGranted", state.exact)
+                .put("batteryOptimizationExempt", state.batteryUnrestricted)
                 .put("notificationsAllowed", notificationsAllowed))
             .put("sign", JSONObject()
                 .put("signedToday", state.signedToday)

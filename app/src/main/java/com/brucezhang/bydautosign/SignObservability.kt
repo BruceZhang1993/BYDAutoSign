@@ -158,7 +158,7 @@ internal data class ScheduleSnapshot(
 internal class ScheduleTelemetry(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("byd_sign_telemetry", Context.MODE_PRIVATE)
     fun planned(next: Long, exact: Boolean) {
-        prefs.edit().putLong("next", next).putBoolean("exact", exact).apply()
+        prefs.edit().putLong("next", next).putBoolean("exact", exact).commit()
     }
     fun alarmFired() {
         val now = System.currentTimeMillis()
@@ -166,7 +166,7 @@ internal class ScheduleTelemetry(context: Context) {
         prefs.edit().putLong("alarm", now)
             .putLong("delay", if (planned > 0) (now - planned).coerceAtLeast(0) else 0).apply()
     }
-    fun enqueued() { prefs.edit().putLong("enqueued", System.currentTimeMillis()).apply() }
+    fun enqueued(at: Long = System.currentTimeMillis()) { prefs.edit().putLong("enqueued", at).commit() }
     fun started() { prefs.edit().putLong("started", System.currentTimeMillis()).putString("state", "执行中").apply() }
     fun finished(state: String) {
         prefs.edit().putLong("finished", System.currentTimeMillis())

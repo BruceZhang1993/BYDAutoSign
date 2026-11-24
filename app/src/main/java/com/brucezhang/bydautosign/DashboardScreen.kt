@@ -311,6 +311,31 @@ internal fun Dashboard(manager: NativeSignManager, onExactPermission: () -> Unit
                         }
                     }
                     item {
+                        OverviewHeading("后台运行环境")
+                        Spacer(Modifier.height(8.dp))
+                        SectionCard {
+                            DetailRow("精确闹钟", if (state.exact) "已允许" else "未允许")
+                            DetailRow("电池优化", if (state.batteryUnrestricted) "不受优化限制" else "受优化限制")
+                            if (!state.exact && Build.VERSION.SDK_INT >= 31)
+                                TextButton(onClick = onExactPermission) { Text("设置精确闹钟") }
+                            TextButton(onClick = {
+                                runCatching { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                            }) { Text("打开电池优化设置") }
+                            Text("厂商系统可能还需允许自启动、关联启动和后台活动；这些权限无法统一自动检测。",
+                                style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = {
+                                runCatching { context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.parse("package:${context.packageName}"))) }
+                            }) { Text("打开系统应用管理") }
+                            HorizontalDivider()
+                            OutlinedButton(enabled = !busy, onClick = { runAction { manager.wakeTest() } }) {
+                                Text("两分钟锁屏唤醒测试")
+                            }
+                            Text("锁屏后等待约两分钟，再查看调度历史。测试不签到，只检查闹钟、服务和系统网络状态。",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    item {
                         OverviewHeading("结果通知")
                         Spacer(Modifier.height(8.dp))
                         SectionCard {

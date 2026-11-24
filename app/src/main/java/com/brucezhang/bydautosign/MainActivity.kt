@@ -68,6 +68,7 @@ internal data class NativeUiState(
     val enabled: Boolean = true,
     val times: String = "",
     val exact: Boolean = false,
+    val batteryUnrestricted: Boolean = false,
     val next: String = "",
     val nextRetry: Boolean = false,
     val lastResult: String = "尚未执行",
@@ -126,6 +127,8 @@ internal class NativeSignManager(private val context: android.content.Context) {
             enabled = store.enabled,
             times = store.times,
             exact = SignScheduler.exactAllowed(context),
+            batteryUnrestricted = context.getSystemService(android.os.PowerManager::class.java)
+                .isIgnoringBatteryOptimizations(context.packageName),
             next = next,
             nextRetry = store.retryAt > 0 && store.retryAt == telemetry.nextAt,
             lastResult = store.lastResult,
@@ -209,6 +212,10 @@ internal class NativeSignManager(private val context: android.content.Context) {
             val result = SignScheduler.configure(context, enabled, times)
             ActionResult(!result.startsWith("设置定时失败"), result)
         }
+    }
+
+    suspend fun wakeTest(): ActionResult = withContext(Dispatchers.IO) {
+        SignScheduler.wakeTest(context)
     }
 
     suspend fun reprobe(): ActionResult = withContext(Dispatchers.IO) {
